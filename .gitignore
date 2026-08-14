@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+env/
+
+# PyInstaller (v0.5 distribuce)
+build/
+dist/
+*.spec
+
+# Lokální konfigurace (v0.5) - obsahuje konkrétní cesty na disku uživatele
+config.json
+!config.example.json
+
+# Editory / OS
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
+
+# Logy
+*.log
