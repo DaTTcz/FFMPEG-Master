@@ -1,0 +1,40 @@
+{
+  "ffmpeg_path": "C:\\FFMPEG\\bin\\ffmpeg.exe",
+  "ffprobe_path": "C:\\FFMPEG\\bin\\ffprobe.exe",
+  "output_dir": "C:\\!VIDEO\\OUTPUT",
+  "done_dir": "C:\\!VIDEO\\HOTOVO",
+  "video": {
+    "codec": "hevc_nvenc",
+    "pix_fmt": "p010le",
+    "profile": "main10",
+    "rc": "vbr",
+    "cq": 28.5,
+    "preset": "p7",
+    "max_width": 1280,
+    "max_height": 720
+  },
+  "audio": {
+    "codec": "libopus",
+    "bitrate": "96k"
+  },
+  "loudnorm": {
+    "I": -18,
+    "TP": -1.5,
+    "LRA": 11
+  },
+  "generate_nfo": true,
+  "source_action_local": "move",
+  "source_action_network": "rename",
+  "use_custom_encode_args": false,
+  "custom_encode_args": "-c:v hevc_nvenc -pix_fmt p010le -profile:v main10 -rc vbr -cq 28.5 -preset p7 -c:a libopus -b:a 96k -c:s copy -max_muxing_queue_size 1024",
+  "nfo_genres": [
+    "Animovaný", "Akční", "Komedie", "Drama", "Sci-Fi", "Fantasy",
+    "Horor", "Dokument", "Thriller", "Rodinný", "Neurčeno"
+  ],
+  "default_genre": "Animovaný",
+  "theme": "dark",
+  "window_geometry": "750x850",
+  "auto_select_languages": ["CZE", "CES"],
+  "github_repo": "DaTTcz/FFMPEG-Master",
+  "check_updates_on_startup": true
+}
