@@ -100,7 +100,7 @@ DEFAULT_CONFIG = {
     ],
     "default_genre": "Animovaný",
     "theme": "dark",
-    "window_geometry": "750x850",
+    "window_geometry": "750x880",
     "auto_select_languages": ["CZE", "CES"],
     "github_repo": GITHUB_REPO,
     "check_updates_on_startup": True
