@@ -100,7 +100,7 @@ DEFAULT_CONFIG = {
     ],
     "default_genre": "Animovaný",
     "theme": "dark",
-    "window_geometry": "750x880",
+    "window_geometry": "750x850",
     "auto_select_languages": ["CZE", "CES"],
     "github_repo": GITHUB_REPO,
     "check_updates_on_startup": True
@@ -400,12 +400,18 @@ class TrackSelectionDialog(ctk.CTkToplevel):
 
         # --- NFO metadata (jen pokud je generování NFO zapnuté v Nastavení) ---
         self.nfo_enabled = cfg.get("generate_nfo", True)
-        self.entry_title = self.entry_year = self.text_plot = self.genre_var = None
+        self.entry_title = self.entry_year = self.text_plot = self.genre_var = self.genre_menu = None
+        self.nfo_file_var = ctk.BooleanVar(value=(initial or {}).get("generate_nfo", True))
 
         if self.nfo_enabled:
             nfo_frame = ctk.CTkFrame(self)
             nfo_frame.pack(fill="x", padx=16, pady=(6, 6))
-            ctk.CTkLabel(nfo_frame, text="📄 NFO metadata", font=("Arial", 12, "bold")).grid(row=0, column=0, columnspan=4, sticky="w", padx=10, pady=(8, 4))
+
+            nfo_header = ctk.CTkFrame(nfo_frame, fg_color="transparent")
+            nfo_header.grid(row=0, column=0, columnspan=4, sticky="w", padx=10, pady=(8, 4))
+            ctk.CTkLabel(nfo_header, text="📄 NFO metadata", font=("Arial", 12, "bold")).pack(side="left")
+            ctk.CTkCheckBox(nfo_header, text="Generovat NFO pro tento soubor", variable=self.nfo_file_var,
+                             command=self._toggle_nfo_fields).pack(side="left", padx=(20, 0))
 
             # init_nfo může být "prázdný" dict, pokud byla položka přidána s vypnutým NFO - v tom
             # případě radši dopočítat rozumné výchozí hodnoty než zobrazit prázdná pole.
@@ -425,12 +431,15 @@ class TrackSelectionDialog(ctk.CTkToplevel):
             genres = cfg.get("nfo_genres") or ["Neurčeno"]
             default_genre = nfo.get("genre") or cfg.get("default_genre", genres[0])
             self.genre_var = ctk.StringVar(value=default_genre if default_genre in genres else genres[0])
-            ctk.CTkOptionMenu(nfo_frame, values=genres, variable=self.genre_var, width=180).grid(row=2, column=1, sticky="w", pady=4)
+            self.genre_menu = ctk.CTkOptionMenu(nfo_frame, values=genres, variable=self.genre_var, width=180)
+            self.genre_menu.grid(row=2, column=1, sticky="w", pady=4)
 
             ctk.CTkLabel(nfo_frame, text="Plot:").grid(row=3, column=0, sticky="nw", padx=(10, 4), pady=(4, 10))
             self.text_plot = ctk.CTkTextbox(nfo_frame, width=560, height=50)
             self.text_plot.insert("1.0", nfo.get("plot", ""))
             self.text_plot.grid(row=3, column=1, columnspan=3, sticky="w", padx=(0, 10), pady=(4, 10))
+
+            self._toggle_nfo_fields()
 
         # --- Tlačítka ---
         btns = ctk.CTkFrame(self, fg_color="transparent")
@@ -474,6 +483,12 @@ class TrackSelectionDialog(ctk.CTkToplevel):
         for idx, var in self.sub_vars.items():
             var.set(idx in self.default_sub_sel)
 
+    def _toggle_nfo_fields(self):
+        state = "normal" if self.nfo_file_var.get() else "disabled"
+        for w in (self.entry_title, self.entry_year, self.text_plot, self.genre_menu):
+            if w is not None:
+                w.configure(state=state)
+
     def _cancel(self):
         self.result = None
         self.grab_release()
@@ -489,12 +504,15 @@ class TrackSelectionDialog(ctk.CTkToplevel):
                 "genre": self.genre_var.get(),
                 "plot": self.text_plot.get("1.0", "end").strip()
             }
+            nfo_for_file = self.nfo_file_var.get()
         else:
             nfo = {"title": "", "year": "", "genre": "", "plot": ""}
+            nfo_for_file = False
         self.result = {
             "selected_audio": sel_audio,
             "selected_subs": sel_subs,
-            "nfo": nfo
+            "nfo": nfo,
+            "generate_nfo_for_file": nfo_for_file
         }
         self.grab_release()
         self.destroy()
@@ -1012,6 +1030,7 @@ del "%~f0"
             "selected_audio": dialog.result["selected_audio"],
             "selected_subs": dialog.result["selected_subs"],
             "nfo": dialog.result["nfo"],
+            "generate_nfo": dialog.result.get("generate_nfo_for_file", True),
         }
         self.queue.append(item)
         self.listbox.insert("end", filename)
@@ -1020,6 +1039,8 @@ del "%~f0"
         self.log(f"\n[ PŘIDÁNO: {filename} ]")
         self.log(f"  Video: {probe['video']['res']}, Délka: {fmt_duration(probe['duration'])}")
         self.log(f"  Vybráno: {a_n} audio stopa/y, {s_n} titulková/é stopa/y")
+        if self.cfg.get("generate_nfo", True) and not item["generate_nfo"]:
+            self.log("  NFO:     pro tento soubor vypnuto.")
         self.log("-" * 50)
 
     def edit_selected(self):
@@ -1042,6 +1063,7 @@ del "%~f0"
             "selected_audio": item["selected_audio"],
             "selected_subs": item["selected_subs"],
             "nfo": item["nfo"],
+            "generate_nfo": item.get("generate_nfo", True),
         }
 
         dialog = TrackSelectionDialog(self, item["filename"], probe, self.cfg, mode="edit", initial=initial)
@@ -1053,10 +1075,13 @@ del "%~f0"
         item["selected_subs"] = dialog.result["selected_subs"]
         if dialog.nfo_enabled:
             item["nfo"] = dialog.result["nfo"]
+            item["generate_nfo"] = dialog.result.get("generate_nfo_for_file", True)
 
         a_n, s_n = len(item["selected_audio"]), len(item["selected_subs"])
         self.log(f"\n[ UPRAVENO: {item['filename']} ]")
         self.log(f"  Vybráno: {a_n} audio stopa/y, {s_n} titulková/é stopa/y")
+        if self.cfg.get("generate_nfo", True) and not item.get("generate_nfo", True):
+            self.log("  NFO:     pro tento soubor vypnuto.")
         self.log("-" * 50)
 
     def handle_drop(self, event):
@@ -1187,6 +1212,8 @@ del "%~f0"
     # --- NFO ---
     def create_nfo(self, item):
         if not self.cfg.get("generate_nfo", True):
+            return None
+        if not item.get("generate_nfo", True):
             return None
         base_name = os.path.splitext(item["filename"])[0]
         nfo_path = os.path.join(self.cfg["output_dir"], base_name + ".nfo")
