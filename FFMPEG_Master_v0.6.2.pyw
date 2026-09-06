@@ -17,7 +17,7 @@ import customtkinter as ctk
 from tkinter import messagebox, Listbox, filedialog, EXTENDED, Menu
 from tkinterdnd2 import DND_FILES, TkinterDnD
 
-VERSION = "v0.6"
+VERSION = "v0.6.2"
 GITHUB_REPO = "DaTTcz/FFMPEG-Master"
 
 # --- OPRAVA IKONY V LIŠTĚ WINDOWS ---
