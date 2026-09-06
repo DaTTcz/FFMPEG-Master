@@ -13,46 +13,43 @@
 
 # FFMPEG Master
 
-Desktopová Windows aplikace (Python + CustomTkinter) pro dávkovou konverzi videa přes **FFmpeg** — hromadné překódování do HEVC (NVENC), výběr audio/titulkových stop, normalizace hlasitosti (loudnorm, 2-průchodová analýza), generování NFO a přesun/přejmenování zpracovaných souborů.
+Desktopová aplikace pro Windows i Linux (Python + CustomTkinter) pro dávkovou konverzi videa přes **FFmpeg** — hromadné překódování do HEVC (NVENC na Windows, na Linuxu i software/VA-API kodeky), výběr audio/titulkových stop, normalizace hlasitosti (loudnorm, 2-průchodová analýza), generování NFO a přesun/přejmenování zpracovaných souborů.
 
-Aktuální verze: **v0.5**. Historie změn viz [CHANGELOG.md](CHANGELOG.md).
+## Funkce
 
-## Funkce (v0.5)
-
-- Drag & drop i výběr souborů, fronta ke zpracování s možností řazení (nahoru/dolů) a mazání položek
-- **Dialog výběru stop** při přidání každého souboru — tabulka audio/titulkových stop (kodek, jazyk, kanály, bitrate, název), checkboxy s auto-výběrem podle nastavených jazyků, varování u obrázkových PGS titulků, tlačítko „Výchozí výběr“
-- **`config.json`** vedle programu — cesty k `ffmpeg`/`ffprobe`, výstupní/cílová složka, CQ/preset/rozlišení, audio bitrate, parametry `loudnorm`, generování NFO, chování se zdrojovým souborem (přesun/přejmenování/ponechat), motiv, uložená geometrie okna
-- **Menu lišta**: Nastavení (editace `config.json` z UI) a O programu (verze, logo, kontakt, kontrola aktualizací)
-- **Kontrola aktualizací z GitHub Releases** — tichá kontrola při startu s nenápadným oznámením, manuální kontrola i stažení/instalace nového `.exe`
-- Překódování do HEVC (`hevc_nvenc`, 10bit `p010le`), parametry CQ/preset/rozlišení podle configu
-- Normalizace hlasitosti dvouprůchodovým `loudnorm` s fallbackem na 1-průchodový režim
-- **NFO generátor** s editovatelným titulem, rokem, žánrem (dropdown z configu) a plotem
-- Log průběhu, progress bar na soubor i celkový, zvukové upozornění po dokončení
-- Splash screen s logem při startu
+- Drag & drop i výběr souborů, fronta ke zpracování s možností řazení (nahoru/dolů), úpravy (tlačítko „Upravit“) a mazání položek
+- **Dialog výběru stop** při přidání i úpravě každého souboru — tabulka audio/titulkových stop (kodek, jazyk, kanály, bitrate, název), checkboxy s auto-výběrem podle nastavených jazyků, varování u obrázkových PGS titulků, tlačítko „Výchozí výběr“, volitelné per-soubor vypnutí NFO a „Kopírovat video beze změny“ pro poškozené/problematické zdroje
+- **`config.json`** vedle programu — cesty k `ffmpeg`/`ffprobe`, výstupní/cílová složka, CQ/preset/rozlišení, audio bitrate, parametry `loudnorm`, generování NFO, chování se zdrojem zvlášť pro lokální a síťové disky (přesun/přejmenování/ponechat), motiv, uložená geometrie okna
+- **Menu lišta**: Nastavení (editace `config.json` z UI, včetně přepínače na vlastní FFmpeg příkaz) a O programu (verze, logo, kontakt, kontrola aktualizací)
+- **Kontrola aktualizací z GitHub Releases** — tichá kontrola při startu s nenápadným oznámením, manuální kontrola i stažení/instalace nové binárky (na Windows `.exe`, na Linuxu samostatná binárka)
+- Překódování do HEVC (`hevc_nvenc`, 10bit `p010le`), parametry CQ/preset/rozlišení podle configu, nebo plně vlastní FFmpeg parametry
+- Normalizace hlasitosti dvouprůchodovým `loudnorm` samostatně pro každou vybranou audio stopu (down-mix na stereo → přesné změření → normalizace), s fallbackem na 1-průchodový režim
+- **NFO generátor** s editovatelným titulem, rokem, žánrem (dropdown z configu) a plotem, volitelně vypnutelný pro konkrétní soubor
+- Log průběhu (včetně hlášek o jednotlivých průchodech), progress bar na soubor i celkový, zvukové upozornění po dokončení
 
 ## Požadavky
 
-- Windows (používá `ctypes`/`shell32` pro ikonu v liště a NVENC hardwarové kódování)
-- Nainstalovaný [FFmpeg](https://ffmpeg.org/) (`ffmpeg.exe`, `ffprobe.exe`)
-- Python 3.10+ s balíčky: `customtkinter`, `tkinterdnd2`, `Pillow` (volitelně, pro splash logo a about dialog)
-- GPU s podporou NVENC (HEVC) pro hardwarové kódování
+- Windows nebo Linux
+- Nainstalovaný [FFmpeg](https://ffmpeg.org/) — na Windows `ffmpeg.exe`/`ffprobe.exe` (výchozí cesta `C:\FFMPEG\bin\...`, upravitelná v Nastavení), na Linuxu se očekává `ffmpeg`/`ffprobe` v `PATH`
+- Python 3.10+ s balíčky ze `requirements.txt` (`customtkinter`, `tkinterdnd2`, `pillow`) — na Linuxu navíc systémový Tk/Tcl (`sudo apt install python3-tk tk-dev` na Debianu/Ubuntu)
+- GPU s podporou NVENC (HEVC) pro hardwarové kódování — na Linuxu bez proprietárního NVIDIA driveru je potřeba v Nastavení přepnout na jiný kodek (`libx265`/`libx264`, nebo VA-API `hevc_vaapi`)
 
 ```bash
-pip install customtkinter tkinterdnd2 pillow
+pip install -r requirements.txt
 ```
 
 ## Spuštění
 
 ```bash
-python FFMPEG_Master_v0_5.pyw
+python FFMPEG_Master_v0.6.pyw
 ```
 
-Při prvním spuštění se vedle scriptu (nebo vedle `.exe`, viz [BUILD.md](BUILD.md)) vytvoří `config.json` s výchozími hodnotami — uprav si ho přes menu **Nastavení** v aplikaci, nebo ručně (vzor v [config.example.json](config.example.json)).
-
-## Sestavení do .exe
-
-Viz [BUILD.md](BUILD.md) — PyInstaller `--onefile` build, `config.json` zůstává editovatelný vedle exe, publikování na GitHub Releases pro fungování auto-update.
+Při prvním spuštění se vedle scriptu (nebo vedle zabalené binárky, viz [BUILD.md](BUILD.md)) vytvoří `config.json` s výchozími hodnotami — uprav si ho přes menu **Nastavení** v aplikaci, nebo ručně (vzor v [config.example.json](config.example.json)).
 
 ## Licence
 
 Tento projekt je licencován pod [PolyForm Noncommercial License 1.0.0](LICENSE) — volné použití pro nekomerční účely (osobní, výzkumné, vzdělávací atd.), komerční použití vyžaduje samostatnou licenci od autora.
+
+## Autor
+
+David Trubka (DaTT.cz)

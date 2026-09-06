@@ -66,11 +66,24 @@ except Exception:
 CONFIG_FILENAME = "config.json"
 CONFIG_PATH = os.path.join(base_dir(), CONFIG_FILENAME)
 
+# Výchozí cesty se liší podle platformy - na Windows natvrdo (jak bylo zvykem), na Linuxu se
+# spoléhá na ffmpeg/ffprobe v PATH (běžné z balíčku distribuce) a výstupní složky pod domovským adresářem.
+if sys.platform == "win32":
+    _DEFAULT_FFMPEG_PATH = r"C:\FFMPEG\bin\ffmpeg.exe"
+    _DEFAULT_FFPROBE_PATH = r"C:\FFMPEG\bin\ffprobe.exe"
+    _DEFAULT_OUTPUT_DIR = r"C:\!VIDEO\VIDEO_OUT\OUTPUT"
+    _DEFAULT_DONE_DIR = r"C:\!VIDEO\VIDEO_OUT\HOTOVO"
+else:
+    _DEFAULT_FFMPEG_PATH = "ffmpeg"
+    _DEFAULT_FFPROBE_PATH = "ffprobe"
+    _DEFAULT_OUTPUT_DIR = os.path.join(os.path.expanduser("~"), "Videos", "FFMPEG_Master", "OUTPUT")
+    _DEFAULT_DONE_DIR = os.path.join(os.path.expanduser("~"), "Videos", "FFMPEG_Master", "HOTOVO")
+
 DEFAULT_CONFIG = {
-    "ffmpeg_path": r"C:\FFMPEG\bin\ffmpeg.exe",
-    "ffprobe_path": r"C:\FFMPEG\bin\ffprobe.exe",
-    "output_dir": r"C:\!VIDEO\VIDEO_OUT\OUTPUT",
-    "done_dir": r"C:\!VIDEO\VIDEO_OUT\HOTOVO",
+    "ffmpeg_path": _DEFAULT_FFMPEG_PATH,
+    "ffprobe_path": _DEFAULT_FFPROBE_PATH,
+    "output_dir": _DEFAULT_OUTPUT_DIR,
+    "done_dir": _DEFAULT_DONE_DIR,
     "video": {
         "codec": "hevc_nvenc",
         "pix_fmt": "p010le",
@@ -600,8 +613,8 @@ class SettingsDialog(ctk.CTkToplevel):
             return entry
 
         section("Cesty")
-        self.e_ffmpeg = path_row("FFmpeg.exe", cfg["ffmpeg_path"])
-        self.e_ffprobe = path_row("FFprobe.exe", cfg["ffprobe_path"])
+        self.e_ffmpeg = path_row("FFmpeg", cfg["ffmpeg_path"])
+        self.e_ffprobe = path_row("FFprobe", cfg["ffprobe_path"])
         self.e_out = path_row("Výstupní složka", cfg["output_dir"], is_dir=True)
         self.e_done = path_row("Složka HOTOVO", cfg["done_dir"], is_dir=True)
 
@@ -855,7 +868,14 @@ def check_for_updates(repo):
 class App(ctk.CTk, TkinterDnD.DnDWrapper):
     def __init__(self):
         super().__init__()
-        self.TkdndVersion = TkinterDnD._require(self)
+        try:
+            self.TkdndVersion = TkinterDnD._require(self)
+            self.dnd_available = True
+        except Exception:
+            # Na některých (hlavně Linux) systémech nemusí být nainstalovaný tkdnd Tcl balíček -
+            # aplikace ať v takovém případě běží dál, jen bez drag & drop (tlačítko "Přidat soubory" funguje vždy).
+            self.TkdndVersion = None
+            self.dnd_available = False
 
         self.cfg = load_config()
         ctk.set_appearance_mode(self.cfg.get("theme", "dark"))
@@ -864,7 +884,15 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self.geometry(self.cfg.get("window_geometry", "750x740"))
 
         try:
-            self.iconbitmap(resource_path("favicon.ico"))
+            if sys.platform == "win32":
+                self.iconbitmap(resource_path("favicon.ico"))
+            elif HAS_PILLOW:
+                # .ico/iconbitmap je Windows-only; na Linuxu/macOS se ikona okna/lišty nastavuje přes iconphoto z PNG.
+                from PIL import ImageTk
+                png_path = resource_path("favicon.png")
+                if os.path.exists(png_path):
+                    self._app_icon_img = ImageTk.PhotoImage(Image.open(png_path))
+                    self.iconphoto(True, self._app_icon_img)
         except Exception:
             pass
 
@@ -886,10 +914,17 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self.drop_frame = ctk.CTkFrame(self.top_frame, height=80, border_width=2, border_color="#1f538d")
         self.drop_frame.pack(side="left", fill="x", expand=True)
         self.drop_frame.pack_propagate(False)
-        self.drop_label = ctk.CTkLabel(self.drop_frame, text="Sem přetáhni video soubory (MKV, MP4, AVI...)")
-        self.drop_label.pack(expand=True)
-        self.drop_frame.drop_target_register(DND_FILES)
-        self.drop_frame.dnd_bind('<<Drop>>', self.handle_drop)
+        if self.dnd_available:
+            self.drop_label = ctk.CTkLabel(self.drop_frame, text="Sem přetáhni video soubory (MKV, MP4, AVI...)")
+            self.drop_label.pack(expand=True)
+            try:
+                self.drop_frame.drop_target_register(DND_FILES)
+                self.drop_frame.dnd_bind('<<Drop>>', self.handle_drop)
+            except Exception:
+                self.dnd_available = False
+        if not self.dnd_available:
+            self.drop_label = ctk.CTkLabel(self.drop_frame, text="Drag & drop není na tomto systému dostupný - použij „Přidat soubory“")
+            self.drop_label.pack(expand=True)
 
         self.btn_browse = ctk.CTkButton(self.top_frame, text="Přidat soubory", width=140, height=80, command=self.browse_files)
         self.btn_browse.pack(side="right", padx=(10, 0))
@@ -967,38 +1002,65 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             self.after(0, lambda: self.update_banner.configure(
                 text=f"🔔 Dostupná nová verze {info['tag']} – klikni pro detaily (aktuální: {VERSION})"))
 
+    @staticmethod
+    def _pick_update_asset(assets):
+        """Vybere release asset odpovídající aktuální platformě. Windows build z CI se jmenuje
+        '*.exe', Linux build '*-linux*' (bez přípony, spustitelný ELF binár)."""
+        if sys.platform == "win32":
+            return next((a for a in assets if (a.get("name") or "").lower().endswith(".exe")), None)
+        else:
+            return next((a for a in assets if "linux" in (a.get("name") or "").lower()), None)
+
     def start_update_download(self, info):
-        exe_asset = next((a for a in info["assets"] if (a.get("name") or "").lower().endswith(".exe")), None)
+        asset = self._pick_update_asset(info["assets"])
         if not getattr(sys, "frozen", False):
             # Vývojový/skriptový režim - automatická výměna souboru nedává smysl, otevři stránku s vydáním.
             self.log("Aktualizace: běžím jako .pyw skript, otevírám stránku s vydáním v prohlížeči.")
             webbrowser.open(info["html_url"])
             return
-        if not exe_asset:
-            messagebox.showwarning("Aktualizace", "V nejnovějším vydání nebyl nalezen soubor .exe. Otevírám stránku s vydáním.")
+        if not asset:
+            plat_name = "Windows (.exe)" if sys.platform == "win32" else "Linux"
+            messagebox.showwarning("Aktualizace", f"V nejnovějším vydání nebyl nalezen soubor pro tuto platformu ({plat_name}). Otevírám stránku s vydáním.")
             webbrowser.open(info["html_url"])
             return
-        threading.Thread(target=self._download_and_install, args=(exe_asset,), daemon=True).start()
+        threading.Thread(target=self._download_and_install, args=(asset,), daemon=True).start()
 
     def _download_and_install(self, asset):
         try:
             update_dir = os.path.join(base_dir(), "update")
             os.makedirs(update_dir, exist_ok=True)
-            new_exe = os.path.join(update_dir, asset["name"])
+            new_path = os.path.join(update_dir, asset["name"])
             self.log(f"Stahuji aktualizaci: {asset['name']}...")
-            urllib.request.urlretrieve(asset["url"], new_exe)
+            urllib.request.urlretrieve(asset["url"], new_path)
             self.log("Stažení dokončeno, instaluji...")
 
             current_exe = sys.executable
-            bat_path = os.path.join(update_dir, "update.bat")
-            with open(bat_path, "w", encoding="utf-8") as f:
-                f.write(f"""@echo off
+            if sys.platform == "win32":
+                # Běžící .exe nejde přepsat sám sebou - pomocný .bat počká, až proces skončí, teprve pak ho nahradí a znovu spustí.
+                bat_path = os.path.join(update_dir, "update.bat")
+                with open(bat_path, "w", encoding="utf-8") as f:
+                    f.write(f"""@echo off
 timeout /t 2 /nobreak >nul
-move /y "{new_exe}" "{current_exe}"
+move /y "{new_path}" "{current_exe}"
 start "" "{current_exe}"
 del "%~f0"
 """)
-            subprocess.Popen(["cmd", "/c", bat_path], creationflags=DETACHED_FLAGS)
+                subprocess.Popen(["cmd", "/c", bat_path], creationflags=DETACHED_FLAGS)
+            else:
+                # Linuxová obdoba .bat postupu - shell skript spuštěný odděleně (start_new_session),
+                # ať přežije i po ukončení tohoto procesu.
+                os.chmod(new_path, 0o755)
+                sh_path = os.path.join(update_dir, "update.sh")
+                with open(sh_path, "w", encoding="utf-8") as f:
+                    f.write(f"""#!/bin/sh
+sleep 2
+mv -f "{new_path}" "{current_exe}"
+chmod +x "{current_exe}"
+"{current_exe}" &
+rm -f "{sh_path}"
+""")
+                os.chmod(sh_path, 0o755)
+                subprocess.Popen(["/bin/sh", sh_path], start_new_session=True)
             self.after(0, self.destroy)
         except Exception as e:
             self.log(f"CHYBA při aktualizaci: {e}", error=True)
@@ -1125,9 +1187,17 @@ del "%~f0"
     def handle_drop(self, event):
         if self.is_running:
             return
-        paths = re.findall(r'\{(.*?)\}|(\S+)', event.data)
-        valid = [os.path.normpath(x[0] if x[0] else x[1]) for x in paths
-                 if (x[0] if x[0] else x[1]).lower().endswith(('.mkv', '.mp4', '.avi', '.mov', '.ts', '.m2ts', '.wmv', '.flv', '.webm', '.m4v'))]
+        try:
+            # self.tk.splitlist() nechá parsování na samotném Tcl interpretu (ten drop data vždy
+            # vydává jako korektní Tcl seznam, {} kolem položek s mezerou/speciálním znakem
+            # včetně). Ruční regex (fallback níže) na některých sestaveních tkdnd - typicky na
+            # Linuxu - selhával a cesty s mezerou v názvu rozsekal na dva neplatné kusy.
+            raw_paths = self.tk.splitlist(event.data)
+        except Exception:
+            matches = re.findall(r'\{(.*?)\}|(\S+)', event.data)
+            raw_paths = [m[0] if m[0] else m[1] for m in matches]
+        valid = [os.path.normpath(p) for p in raw_paths
+                 if p.lower().endswith(('.mkv', '.mp4', '.avi', '.mov', '.ts', '.m2ts', '.wmv', '.flv', '.webm', '.m4v'))]
         self._maybe_clear_log()
         for path in valid:
             self.add_file(path)
