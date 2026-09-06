@@ -1,0 +1,117 @@
+name: Build binaries
+
+# Spouští se automaticky při pushnutí tagu ve tvaru "v*" (např. v0.6, v0.7.1) - vytvoří/aktualizuje
+# GitHub Release z toho tagu a přiloží k němu Windows .exe i Linux binárku. Jde spustit i ručně
+# (workflow_dispatch) jen kvůli otestování buildu, bez zásahu do releasu.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Najdi aktuální hlavní skript
+        id: main
+        shell: bash
+        run: |
+          FILE=$(ls FFMPEG_Master_v*.pyw | head -n1)
+          echo "Hlavní skript: $FILE"
+          echo "script=$FILE" >> "$GITHUB_OUTPUT"
+
+      - name: Build (PyInstaller)
+        shell: bash
+        run: |
+          pyinstaller --noconfirm --onefile --windowed \
+            --name FFMPEG_Master \
+            --icon favicon.ico \
+            --add-data "favicon.ico;." \
+            --add-data "favicon.png;." \
+            --collect-all tkinterdnd2 \
+            "${{ steps.main.outputs.script }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-exe
+          path: dist/FFMPEG_Master.exe
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Systémové závislosti pro Tkinter/Tk
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-tk tk-dev
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Najdi aktuální hlavní skript
+        id: main
+        run: |
+          FILE=$(ls FFMPEG_Master_v*.pyw | head -n1)
+          echo "Hlavní skript: $FILE"
+          echo "script=$FILE" >> "$GITHUB_OUTPUT"
+
+      - name: Build (PyInstaller)
+        run: |
+          pyinstaller --noconfirm --onefile --windowed \
+            --name FFMPEG_Master-linux-x86_64 \
+            --add-data "favicon.ico:." \
+            --add-data "favicon.png:." \
+            --collect-all tkinterdnd2 \
+            "${{ steps.main.outputs.script }}"
+          chmod +x dist/FFMPEG_Master-linux-x86_64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-binary
+          path: dist/FFMPEG_Master-linux-x86_64
+
+  release:
+    needs: [build-windows, build-linux]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-exe
+          path: dist-windows
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-binary
+          path: dist-linux
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist-windows/FFMPEG_Master.exe
+            dist-linux/FFMPEG_Master-linux-x86_64
