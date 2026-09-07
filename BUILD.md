@@ -45,7 +45,8 @@ pyinstaller --noconfirm --onefile --windowed ^
   --add-data "favicon.ico;." ^
   --add-data "favicon.png;." ^
   --collect-all tkinterdnd2 ^
-  FFMPEG_Master_v0.6.pyw
+  --collect-all customtkinter ^
+  FFMPEG_Master_v0.6.3.pyw
 ```
 
 ### Linux
@@ -62,7 +63,8 @@ pyinstaller --noconfirm --onefile --windowed \
   --add-data "favicon.ico:." \
   --add-data "favicon.png:." \
   --collect-all tkinterdnd2 \
-  FFMPEG_Master_v0.6.pyw
+  --collect-all customtkinter \
+  FFMPEG_Master_v0.6.3.pyw
 chmod +x dist/FFMPEG_Master-linux-x86_64
 ```
 
@@ -71,6 +73,7 @@ Vysvětlení společných přepínačů:
 - `--windowed` — bez konzolového okna na pozadí (na Linuxu bez efektu, ale neškodí).
 - `--add-data "soubor;."` / `"soubor:."` — zabalí `favicon.ico`/`favicon.png` dovnitř (oddělovač je `;` na Windows, `:` na Linuxu).
 - `--collect-all tkinterdnd2` — zabalí i nativní tkdnd binárky, jinak drag & drop ve zmrazeném buildu nefunguje.
+- `--collect-all customtkinter` — zabalí i interní datové soubory CustomTkinter (barevná témata ve formátu JSON apod.), o které PyInstaller sám neví, protože nejsou naimportované jako Python kód. Bez tohoto přepínače hrozí na některých systémech chybějící/špatně vykreslené prvky UI.
 - **`config.json` se NEBALÍ dovnitř.** Aplikace ho očekává (a při prvním spuštění sama vytvoří) ve stejné složce, kde leží binárka — viz `base_dir()` v kódu, který pro zmrazený build použije `os.path.dirname(sys.executable)`. Díky tomu jde konfiguraci měnit i po zabalení, bez nutnosti znovu buildit.
 
 Hotový soubor najdeš v `dist/`. Zkopíruj ho do cílové složky — `config.json` se tam při prvním spuštění vytvoří automaticky s výchozími hodnotami (uprav si ho pak v aplikaci přes menu **Nastavení**, nebo ručně, vzor v [config.example.json](config.example.json)).
@@ -81,3 +84,5 @@ Hotový soubor najdeš v `dist/`. Zkopíruj ho do cílové složky — `config.j
 - `ffmpeg`/`ffprobe` se na Linuxu očekávají v `PATH` (výchozí hodnoty configu jsou prostě `ffmpeg`/`ffprobe`), na Windows zůstává výchozí cesta natvrdo `C:\FFMPEG\bin\...`.
 - Drag & drop potřebuje systémový Tcl balíček `tkdnd` (na většině distribucí ho tkinterdnd2 nese už zabalený ve wheelu) — pokud by na nějakém systému chyběl, aplikace to detekuje a spustí se dál bez drag & drop (jen s tlačítkem „Přidat soubory“), nespadne.
 - Ikona v okně/liště se na Linuxu/macOS nastavuje z `favicon.png` (`iconphoto`), na Windows z `favicon.ico` (`iconbitmap`) — řeší se to samo podle platformy.
+- **Chybějící obrázky/ikony v zabalené Linux binárce** — pokud se přesto splash logo, logo v „O programu“ nebo ikona okna nezobrazí, aplikace teď při startu vypíše na stderr (spusť binárku z terminálu, ne dvojklikem, ať to uvidíš) přesně, jakou cestu zkoušela a proč selhala. `resource_path()` navíc zkouší víc míst (PyInstaller `_MEIPASS`, adresář vedle binárky, adresář vedle skriptu) — jako nouzové řešení stačí zkopírovat `favicon.ico`/`favicon.png` do stejné složky, kde leží binárka.
+- **Ikona v systémové nabídce/launcheru (start menu, dock).** To se zabalenou binárkou samo nestane — potřebuje samostatný `.desktop` soubor + ikonu na XDG místě. Aplikace si ho při prvním spuštění na Linuxu sama vytvoří (`ensure_linux_desktop_entry()` v kódu) do `~/.local/share/applications/ffmpeg-master.desktop` a `~/.local/share/icons/hicolor/256x256/apps/ffmpeg-master.png` — bez root práv. Některá desktopová prostředí potřebují odhlásit/znovu přihlásit se (nebo restartovat launcher), než si nové ikony všimnou.

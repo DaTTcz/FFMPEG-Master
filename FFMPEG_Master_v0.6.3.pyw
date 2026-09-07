@@ -17,7 +17,7 @@ import customtkinter as ctk
 from tkinter import messagebox, Listbox, filedialog, EXTENDED, Menu
 from tkinterdnd2 import DND_FILES, TkinterDnD
 
-VERSION = "v0.6.2"
+VERSION = "v0.6.3"
 GITHUB_REPO = "DaTTcz/FFMPEG-Master"
 
 # --- OPRAVA IKONY V LIŠTĚ WINDOWS ---
@@ -29,12 +29,25 @@ except Exception:
 
 
 def resource_path(relative_path):
-    """Cesta k souborům zabaleným uvnitř exe (ikony, obrázky) - funguje v .py i ve zmrazeném PyInstaller exe."""
-    try:
-        base_path = sys._MEIPASS
-    except Exception:
-        base_path = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(base_path, relative_path)
+    """Cesta k souborům zabaleným uvnitř exe (ikony, obrázky) - funguje v .py i ve zmrazeném PyInstaller exe.
+
+    Zkusí víc kandidátních umístění (PyInstaller onefile extrakční adresář _MEIPASS, adresář vedle
+    samotné binárky, adresář vedle .pyw skriptu) a vrátí první, které skutečně existuje. Díky tomu
+    funguje i workaround "dej favicon.ico/favicon.png ručně vedle binárky", kdyby se z nějakého
+    důvodu nezabalily dovnitř (a do konzole/logu se v takovém případě napíše varování - viz volající)."""
+    candidates = []
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidates.append(os.path.join(meipass, relative_path))
+    if getattr(sys, "frozen", False):
+        candidates.append(os.path.join(os.path.dirname(sys.executable), relative_path))
+    candidates.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), relative_path))
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            return candidate
+    # Nic nenalezeno - vrať první kandidát (obvyklé chování dřív), volající si existenci stejně
+    # ověřuje přes os.path.exists a chybějící soubor jen zaloguje/přeskočí.
+    return candidates[0]
 
 
 def base_dir():
@@ -42,6 +55,71 @@ def base_dir():
     if getattr(sys, 'frozen', False):
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
+
+
+def ensure_linux_desktop_entry():
+    """Na Linuxu (jen ve zabalené binárce) zaregistruje aplikaci do standardní XDG nabídky/launcheru.
+
+    Samotné spuštění binárky o tohle nijak nepečuje - ikona nastavená přes iconphoto() v kódu výše
+    platí jen pro běžící okno (titulkový pruh, přepínač oken), ale start menu/launcher/dock potřebuje
+    samostatný .desktop soubor + ikonu na standardním místě (~/.local/share/applications,
+    ~/.local/share/icons/...). Bez rootu, jen do domovského adresáře uživatele; bezpečně se přeskočí
+    (žádná chyba), pokud cokoliv selže - jde čistě o kosmetické vylepšení, ne o nutnou podmínku běhu."""
+    try:
+        data_home = os.environ.get("XDG_DATA_HOME") or os.path.join(os.path.expanduser("~"), ".local", "share")
+        icons_dir = os.path.join(data_home, "icons", "hicolor", "256x256", "apps")
+        apps_dir = os.path.join(data_home, "applications")
+        os.makedirs(icons_dir, exist_ok=True)
+        os.makedirs(apps_dir, exist_ok=True)
+
+        icon_dest = os.path.join(icons_dir, "ffmpeg-master.png")
+        src_icon = resource_path("favicon.png")
+        icon_value = "ffmpeg-master"
+        if os.path.exists(src_icon):
+            try:
+                if not os.path.exists(icon_dest) or os.path.getmtime(src_icon) > os.path.getmtime(icon_dest):
+                    shutil.copyfile(src_icon, icon_dest)
+            except Exception:
+                pass
+        else:
+            # Ikona se nikam nezkopírovala (nenašla se) - použij rovnou absolutní cestu k PNG vedle
+            # binárky/skriptu jako Icon=, ať launcher aspoň má šanci ji najít.
+            icon_value = src_icon
+
+        desktop_path = os.path.join(apps_dir, "ffmpeg-master.desktop")
+        exe_path = sys.executable if getattr(sys, "frozen", False) else os.path.abspath(__file__)
+        content = (
+            "[Desktop Entry]\n"
+            "Type=Application\n"
+            "Name=FFMPEG Master\n"
+            "Comment=Davkovy konvertor videa pres FFmpeg\n"
+            f"Exec=\"{exe_path}\"\n"
+            f"Icon={icon_value}\n"
+            "Terminal=false\n"
+            "Categories=AudioVideo;Video;\n"
+        )
+        needs_write = True
+        if os.path.exists(desktop_path):
+            try:
+                with open(desktop_path, "r", encoding="utf-8") as f:
+                    needs_write = f.read() != content
+            except Exception:
+                needs_write = True
+        if needs_write:
+            with open(desktop_path, "w", encoding="utf-8") as f:
+                f.write(content)
+            try:
+                os.chmod(desktop_path, 0o755)
+            except Exception:
+                pass
+            # Nepovinné - jen pokud je nástroj po ruce; některá desktopová prostředí si soubor
+            # všimnou i bez toho, jiná potřebují databázi obnovit ručně.
+            try:
+                subprocess.run(["update-desktop-database", apps_dir], capture_output=True, timeout=5)
+            except Exception:
+                pass
+    except Exception as e:
+        print(f"[FFMPEG Master] Registrace .desktop záznamu selhala (nekritické): {e}", file=sys.stderr)
 
 
 # --- CROSS-PLATFORM PŘÍPRAVA ---
@@ -337,8 +415,10 @@ class SplashScreen(ctk.CTkToplevel):
                     self.logo_label = ctk.CTkLabel(self, image=logo_img, text="")
                     self.logo_label.pack(pady=(30, 10))
                     logo_loaded = True
-            except Exception:
-                pass
+                else:
+                    print(f"[FFMPEG Master] Logo nenalezeno: {img_path}", file=sys.stderr)
+            except Exception as e:
+                print(f"[FFMPEG Master] Načtení loga selhalo ({img_path if 'img_path' in locals() else '?'}): {e}", file=sys.stderr)
 
         if not logo_loaded:
             self.logo_label = ctk.CTkLabel(self, text=f"FFMPEG Master {VERSION}", font=("Arial", 32, "bold"), text_color="#1f538d")
@@ -785,8 +865,10 @@ class AboutDialog(ctk.CTkToplevel):
                     img_raw = Image.open(img_path)
                     logo_img = ctk.CTkImage(light_image=img_raw, dark_image=img_raw, size=(96, 96))
                     ctk.CTkLabel(self, image=logo_img, text="").pack(pady=(20, 8))
-            except Exception:
-                pass
+                else:
+                    print(f"[FFMPEG Master] Logo nenalezeno: {img_path}", file=sys.stderr)
+            except Exception as e:
+                print(f"[FFMPEG Master] Načtení loga selhalo: {e}", file=sys.stderr)
 
         ctk.CTkLabel(self, text=f"FFMPEG Master {VERSION}", font=("Arial", 18, "bold")).pack(pady=(0, 2))
         ctk.CTkLabel(self, text="Dávkový konvertor videa přes FFmpeg", font=("Arial", 11), text_color="gray").pack()
@@ -885,7 +967,11 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
 
         try:
             if sys.platform == "win32":
-                self.iconbitmap(resource_path("favicon.ico"))
+                ico_path = resource_path("favicon.ico")
+                if os.path.exists(ico_path):
+                    self.iconbitmap(ico_path)
+                else:
+                    print(f"[FFMPEG Master] Ikona nenalezena: {ico_path}", file=sys.stderr)
             elif HAS_PILLOW:
                 # .ico/iconbitmap je Windows-only; na Linuxu/macOS se ikona okna/lišty nastavuje přes iconphoto z PNG.
                 from PIL import ImageTk
@@ -893,8 +979,14 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
                 if os.path.exists(png_path):
                     self._app_icon_img = ImageTk.PhotoImage(Image.open(png_path))
                     self.iconphoto(True, self._app_icon_img)
-        except Exception:
-            pass
+                else:
+                    print(f"[FFMPEG Master] Ikona nenalezena: {png_path}", file=sys.stderr)
+            # Na Linuxu navíc zaregistruj .desktop soubor a ikonu do XDG umístění, ať se aplikace
+            # objeví ve startovací nabídce/launcheru se správnou ikonou (viz ensure_linux_desktop_entry()).
+            if sys.platform not in ("win32", "darwin"):
+                ensure_linux_desktop_entry()
+        except Exception as e:
+            print(f"[FFMPEG Master] Nastavení ikony okna selhalo: {e}", file=sys.stderr)
 
         self.is_running = False
         self.stop_requested = False

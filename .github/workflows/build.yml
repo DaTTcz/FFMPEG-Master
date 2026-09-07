@@ -46,6 +46,7 @@ jobs:
             --add-data "favicon.ico;." \
             --add-data "favicon.png;." \
             --collect-all tkinterdnd2 \
+            --collect-all customtkinter \
             "${{ steps.main.outputs.script }}"
 
       - uses: actions/upload-artifact@v4
@@ -86,6 +87,7 @@ jobs:
             --add-data "favicon.ico:." \
             --add-data "favicon.png:." \
             --collect-all tkinterdnd2 \
+            --collect-all customtkinter \
             "${{ steps.main.outputs.script }}"
           chmod +x dist/FFMPEG_Master-linux-x86_64
 
