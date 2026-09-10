@@ -17,7 +17,7 @@ import customtkinter as ctk
 from tkinter import messagebox, Listbox, filedialog, EXTENDED, Menu
 from tkinterdnd2 import DND_FILES, TkinterDnD
 
-VERSION = "v0.6.3"
+VERSION = "v0.6.4"
 GITHUB_REPO = "DaTTcz/FFMPEG-Master"
 
 # --- OPRAVA IKONY V LIŠTĚ WINDOWS ---
@@ -981,12 +981,17 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
                     self.iconphoto(True, self._app_icon_img)
                 else:
                     print(f"[FFMPEG Master] Ikona nenalezena: {png_path}", file=sys.stderr)
-            # Na Linuxu navíc zaregistruj .desktop soubor a ikonu do XDG umístění, ať se aplikace
-            # objeví ve startovací nabídce/launcheru se správnou ikonou (viz ensure_linux_desktop_entry()).
+        except Exception as e:
+            print(f"[FFMPEG Master] Nastavení ikony okna selhalo: {e}", file=sys.stderr)
+
+        # Samostatný try/except (nezávislý na nastavení ikony okna výše) - .desktop záznam se má
+        # zaregistrovat i kdyby selhalo cokoliv jiného (typicky chybějící PIL._tkinter_finder v
+        # zabaleném buildu - viz --hidden-import PIL._tkinter_finder v build.yml/BUILD.md).
+        try:
             if sys.platform not in ("win32", "darwin"):
                 ensure_linux_desktop_entry()
         except Exception as e:
-            print(f"[FFMPEG Master] Nastavení ikony okna selhalo: {e}", file=sys.stderr)
+            print(f"[FFMPEG Master] Registrace .desktop záznamu selhala: {e}", file=sys.stderr)
 
         self.is_running = False
         self.stop_requested = False

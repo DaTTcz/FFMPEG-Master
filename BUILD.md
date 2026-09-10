@@ -46,7 +46,8 @@ pyinstaller --noconfirm --onefile --windowed ^
   --add-data "favicon.png;." ^
   --collect-all tkinterdnd2 ^
   --collect-all customtkinter ^
-  FFMPEG_Master_v0.6.3.pyw
+  --hidden-import PIL._tkinter_finder ^
+  FFMPEG_Master_v0.6.4.pyw
 ```
 
 ### Linux
@@ -64,7 +65,8 @@ pyinstaller --noconfirm --onefile --windowed \
   --add-data "favicon.png:." \
   --collect-all tkinterdnd2 \
   --collect-all customtkinter \
-  FFMPEG_Master_v0.6.3.pyw
+  --hidden-import PIL._tkinter_finder \
+  FFMPEG_Master_v0.6.4.pyw
 chmod +x dist/FFMPEG_Master-linux-x86_64
 ```
 
@@ -74,6 +76,7 @@ Vysvětlení společných přepínačů:
 - `--add-data "soubor;."` / `"soubor:."` — zabalí `favicon.ico`/`favicon.png` dovnitř (oddělovač je `;` na Windows, `:` na Linuxu).
 - `--collect-all tkinterdnd2` — zabalí i nativní tkdnd binárky, jinak drag & drop ve zmrazeném buildu nefunguje.
 - `--collect-all customtkinter` — zabalí i interní datové soubory CustomTkinter (barevná témata ve formátu JSON apod.), o které PyInstaller sám neví, protože nejsou naimportované jako Python kód. Bez tohoto přepínače hrozí na některých systémech chybějící/špatně vykreslené prvky UI.
+- **`--hidden-import PIL._tkinter_finder`** — skutečná (potvrzená) příčina chybějících obrázků/ikon v zabaleném buildu. `PIL.ImageTk` (používá se pro ikonu okna a logo v UI) si tenhle modul hledá dynamicky za běhu, takže ho PyInstaller při statické analýze kódu nezachytí a nezabalí — bez tohoto přepínače selže s `No module named 'PIL._tkinter_finder'` (viditelné na stderr, viz diagnostika níže) a obrázky/ikony se nikde nezobrazí.
 - **`config.json` se NEBALÍ dovnitř.** Aplikace ho očekává (a při prvním spuštění sama vytvoří) ve stejné složce, kde leží binárka — viz `base_dir()` v kódu, který pro zmrazený build použije `os.path.dirname(sys.executable)`. Díky tomu jde konfiguraci měnit i po zabalení, bez nutnosti znovu buildit.
 
 Hotový soubor najdeš v `dist/`. Zkopíruj ho do cílové složky — `config.json` se tam při prvním spuštění vytvoří automaticky s výchozími hodnotami (uprav si ho pak v aplikaci přes menu **Nastavení**, nebo ručně, vzor v [config.example.json](config.example.json)).
@@ -84,5 +87,5 @@ Hotový soubor najdeš v `dist/`. Zkopíruj ho do cílové složky — `config.j
 - `ffmpeg`/`ffprobe` se na Linuxu očekávají v `PATH` (výchozí hodnoty configu jsou prostě `ffmpeg`/`ffprobe`), na Windows zůstává výchozí cesta natvrdo `C:\FFMPEG\bin\...`.
 - Drag & drop potřebuje systémový Tcl balíček `tkdnd` (na většině distribucí ho tkinterdnd2 nese už zabalený ve wheelu) — pokud by na nějakém systému chyběl, aplikace to detekuje a spustí se dál bez drag & drop (jen s tlačítkem „Přidat soubory“), nespadne.
 - Ikona v okně/liště se na Linuxu/macOS nastavuje z `favicon.png` (`iconphoto`), na Windows z `favicon.ico` (`iconbitmap`) — řeší se to samo podle platformy.
-- **Chybějící obrázky/ikony v zabalené Linux binárce** — pokud se přesto splash logo, logo v „O programu“ nebo ikona okna nezobrazí, aplikace teď při startu vypíše na stderr (spusť binárku z terminálu, ne dvojklikem, ať to uvidíš) přesně, jakou cestu zkoušela a proč selhala. `resource_path()` navíc zkouší víc míst (PyInstaller `_MEIPASS`, adresář vedle binárky, adresář vedle skriptu) — jako nouzové řešení stačí zkopírovat `favicon.ico`/`favicon.png` do stejné složky, kde leží binárka.
-- **Ikona v systémové nabídce/launcheru (start menu, dock).** To se zabalenou binárkou samo nestane — potřebuje samostatný `.desktop` soubor + ikonu na XDG místě. Aplikace si ho při prvním spuštění na Linuxu sama vytvoří (`ensure_linux_desktop_entry()` v kódu) do `~/.local/share/applications/ffmpeg-master.desktop` a `~/.local/share/icons/hicolor/256x256/apps/ffmpeg-master.png` — bez root práv. Některá desktopová prostředí potřebují odhlásit/znovu přihlásit se (nebo restartovat launcher), než si nové ikony všimnou.
+- **Chybějící obrázky/ikony v zabalené Linux binárce — potvrzená příčina: chybějící `PIL._tkinter_finder`.** `PIL.ImageTk` (ikona okna, logo na splash screenu i v „O programu“) si tenhle modul hledá dynamicky za běhu, takže ho PyInstaller sám nezabalí bez explicitního `--hidden-import PIL._tkinter_finder` (viz výše) — bez něj selže s `No module named 'PIL._tkinter_finder'`. Od v0.6.3 to aplikace při startu vypíše na stderr (spusť binárku z terminálu, ne dvojklikem, ať to uvidíš), takže se podobné problémy dají příště rychle odhalit. `resource_path()` navíc zkouší víc míst (PyInstaller `_MEIPASS`, adresář vedle binárky, adresář vedle skriptu) — jako nouzové řešení stačí zkopírovat `favicon.ico`/`favicon.png` do stejné složky, kde leží binárka.
+- **Ikona v systémové nabídce/launcheru (start menu, dock, kategorie Multimedia).** To se zabalenou binárkou samo nestane — potřebuje samostatný `.desktop` soubor + ikonu na XDG místě. Aplikace si ho při prvním spuštění na Linuxu sama vytvoří (`ensure_linux_desktop_entry()` v kódu, běží nezávisle na nastavení ikony okna výše — jedno selhání druhé neblokuje) do `~/.local/share/applications/ffmpeg-master.desktop` a `~/.local/share/icons/hicolor/256x256/apps/ffmpeg-master.png` — bez root práv. Některá desktopová prostředí potřebují odhlásit/znovu přihlásit se (nebo restartovat launcher/`update-desktop-database`), než si nové ikony/položky všimnou.
