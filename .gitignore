@@ -12,6 +12,12 @@ build/
 dist/
 *.spec
 
+# Ruční lokální AppImage build (v0.7 distribuce) - viz BUILD.md
+AppDir/
+squashfs-root/
+appimagetool*.AppImage
+*.AppImage
+
 # Lokální konfigurace (v0.5) - obsahuje konkrétní cesty na disku uživatele
 config.json
 !config.example.json

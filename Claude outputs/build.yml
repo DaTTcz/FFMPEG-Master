@@ -1,0 +1,161 @@
+name: Build binaries
+
+# Spouští se automaticky při pushnutí tagu ve tvaru "v*" (např. v0.7, v0.7.1) - vytvoří/aktualizuje
+# GitHub Release z toho tagu a přiloží k němu Windows .exe a univerzální Linux AppImage. Jde
+# spustit i ručně (workflow_dispatch) jen kvůli otestování buildu, bez zásahu do releasu.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Najdi aktuální hlavní skript
+        id: main
+        shell: bash
+        run: |
+          FILE=$(ls FFMPEG_Master_v*.pyw | head -n1)
+          echo "Hlavní skript: $FILE"
+          echo "script=$FILE" >> "$GITHUB_OUTPUT"
+
+      - name: Build (PyInstaller)
+        shell: bash
+        run: |
+          pyinstaller --noconfirm --onefile --windowed \
+            --name FFMPEG_Master \
+            --icon favicon.ico \
+            --add-data "favicon.ico;." \
+            --add-data "favicon.png;." \
+            --collect-all tkinterdnd2 \
+            --collect-all customtkinter \
+            --hidden-import PIL._tkinter_finder \
+            "${{ steps.main.outputs.script }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-exe
+          path: dist/FFMPEG_Master.exe
+
+  build-linux:
+    runs-on: ubuntu-latest
+    # Staví se uvnitř kontejneru se starší Ubuntu 22.04 (glibc 2.35) místo přímo na ubuntu-latest
+    # runneru (dnes Ubuntu 24.04, glibc 2.39). PyInstaller onefile binárka je dynamicky slinkovaná
+    # proti glibc/Tcl-Tk sestavovacího stroje - postavená proti novější glibc na starším systému
+    # (např. Linux Mint 21.x, který vychází z Ubuntu 22.04) vůbec nenaběhne ("GLIBC_2.3x not
+    # found"). Glibc je zpětně kompatibilní (staré binárky běží i na novějších systémech), takže
+    # sestavení proti starší základně binárku dělá univerzálnější, ne méně kompatibilní.
+    container: ubuntu:22.04
+    env:
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Systémové závislosti (Python/Tk pro PyInstaller build)
+        run: |
+          apt-get update
+          apt-get install -y python3 python3-pip python3-tk tk-dev wget
+
+      - name: Install dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Najdi aktuální hlavní skript
+        id: main
+        run: |
+          FILE=$(ls FFMPEG_Master_v*.pyw | head -n1)
+          echo "Hlavní skript: $FILE"
+          echo "script=$FILE" >> "$GITHUB_OUTPUT"
+
+      - name: Build (PyInstaller)
+        run: |
+          pyinstaller --noconfirm --onefile --windowed \
+            --name ffmpeg-master \
+            --add-data "favicon.ico:." \
+            --add-data "favicon.png:." \
+            --collect-all tkinterdnd2 \
+            --collect-all customtkinter \
+            --hidden-import PIL._tkinter_finder \
+            "${{ steps.main.outputs.script }}"
+          chmod +x dist/ffmpeg-master
+
+      - name: Připrav sdílený .desktop soubor
+        run: |
+          cat > ffmpeg-master.desktop << 'EOF'
+          [Desktop Entry]
+          Type=Application
+          Name=FFMPEG Master
+          Comment=Davkovy konvertor videa pres FFmpeg
+          Exec=ffmpeg-master
+          Icon=ffmpeg-master
+          Terminal=false
+          Categories=AudioVideo;Video;
+          EOF
+
+      - name: Sestav AppImage (univerzální - běží na jakékoliv distribuci)
+        run: |
+          mkdir -p AppDir/usr/bin AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/256x256/apps
+          cp dist/ffmpeg-master AppDir/usr/bin/ffmpeg-master
+          cp favicon.png AppDir/usr/share/icons/hicolor/256x256/apps/ffmpeg-master.png
+          cp favicon.png AppDir/ffmpeg-master.png
+          cp ffmpeg-master.desktop AppDir/usr/share/applications/ffmpeg-master.desktop
+          cp ffmpeg-master.desktop AppDir/ffmpeg-master.desktop
+          cat > AppDir/AppRun << 'EOF'
+          #!/bin/sh
+          HERE="$(dirname "$(readlink -f "$0")")"
+          exec "$HERE/usr/bin/ffmpeg-master" "$@"
+          EOF
+          chmod +x AppDir/AppRun
+
+          wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage -O appimagetool.AppImage
+          chmod +x appimagetool.AppImage
+          # V kontejneru bez FUSE nejde AppImage rovnou spustit - rozbal a spusť ho ručně místo toho.
+          ./appimagetool.AppImage --appimage-extract
+          ARCH=x86_64 ./squashfs-root/AppRun AppDir FFMPEG_Master-x86_64.AppImage
+          chmod +x FFMPEG_Master-x86_64.AppImage
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-appimage
+          path: FFMPEG_Master-x86_64.AppImage
+
+  release:
+    needs: [build-windows, build-linux]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-exe
+          path: dist-windows
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-appimage
+          path: dist-linux-appimage
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist-windows/FFMPEG_Master.exe
+            dist-linux-appimage/FFMPEG_Master-x86_64.AppImage
