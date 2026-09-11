@@ -1,11 +1,16 @@
 name: Build binaries
 
-# Spouští se automaticky při pushnutí tagu ve tvaru "v*" (např. v0.7, v0.7.1) - vytvoří/aktualizuje
-# GitHub Release z toho tagu a přiloží k němu Windows .exe a univerzální Linux AppImage. Jde
-# spustit i ručně (workflow_dispatch) jen kvůli otestování buildu, bez zásahu do releasu.
+# Sestavení (build-windows/build-linux) běží při KAŽDÉM pushnutí do main - funguje jako testovací
+# build, ať se chyby v pipeline (chybějící balíček, rozbitý PyInstaller krok apod.) odhalí hned,
+# ne až při tagu. Samotný GitHub Release (job "release") se ale vytvoří/aktualizuje jen při
+# pushnutí tagu ve tvaru "v*" (např. v0.7, v0.7.1) - k tomu tagu se pak přiloží Windows .exe
+# a univerzální Linux AppImage. Jde spustit i ručně (workflow_dispatch) se stejným efektem jako
+# push do main - jen sestaví, release nevytvoří/needituje.
 
 on:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
   workflow_dispatch:
@@ -33,7 +38,7 @@ jobs:
         id: main
         shell: bash
         run: |
-          FILE=$(ls FFMPEG_Master_v*.pyw | head -n1)
+          FILE=$(ls FFMPEG_Master_v*.pyw | sort -V | tail -n1)
           echo "Hlavní skript: $FILE"
           echo "script=$FILE" >> "$GITHUB_OUTPUT"
 
@@ -57,32 +62,27 @@ jobs:
 
   build-linux:
     runs-on: ubuntu-latest
-    # Staví se uvnitř kontejneru se starší Ubuntu 22.04 (glibc 2.35) místo přímo na ubuntu-latest
-    # runneru (dnes Ubuntu 24.04, glibc 2.39). PyInstaller onefile binárka je dynamicky slinkovaná
-    # proti glibc/Tcl-Tk sestavovacího stroje - postavená proti novější glibc na starším systému
-    # (např. Linux Mint 21.x, který vychází z Ubuntu 22.04) vůbec nenaběhne ("GLIBC_2.3x not
-    # found"). Glibc je zpětně kompatibilní (staré binárky běží i na novějších systémech), takže
-    # sestavení proti starší základně binárku dělá univerzálnější, ne méně kompatibilní.
-    container: ubuntu:22.04
-    env:
-      DEBIAN_FRONTEND: noninteractive
     steps:
       - uses: actions/checkout@v4
 
-      - name: Systémové závislosti (Python/Tk pro PyInstaller build)
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Systémové závislosti pro Tkinter/Tk a AppImage
         run: |
-          apt-get update
-          apt-get install -y python3 python3-pip python3-tk tk-dev wget
+          sudo apt-get update
+          sudo apt-get install -y python3-tk tk-dev file
 
       - name: Install dependencies
         run: |
-          python3 -m pip install --upgrade pip
+          python -m pip install --upgrade pip
           pip install -r requirements.txt pyinstaller
 
       - name: Najdi aktuální hlavní skript
         id: main
         run: |
-          FILE=$(ls FFMPEG_Master_v*.pyw | head -n1)
+          FILE=$(ls FFMPEG_Master_v*.pyw | sort -V | tail -n1)
           echo "Hlavní skript: $FILE"
           echo "script=$FILE" >> "$GITHUB_OUTPUT"
 
@@ -128,7 +128,7 @@ jobs:
 
           wget -q https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage -O appimagetool.AppImage
           chmod +x appimagetool.AppImage
-          # V kontejneru bez FUSE nejde AppImage rovnou spustit - rozbal a spusť ho ručně místo toho.
+          # Rozbal a spusť appimagetool ručně místo přímého spuštění - runner nemusí mít FUSE.
           ./appimagetool.AppImage --appimage-extract
           ARCH=x86_64 ./squashfs-root/AppRun AppDir FFMPEG_Master-x86_64.AppImage
           chmod +x FFMPEG_Master-x86_64.AppImage
