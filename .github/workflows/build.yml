@@ -6,8 +6,10 @@ name: Build binaries
 # v requirements.txt, ale netrvá to minuty jako celý PyInstaller build.
 #
 # Skutečný build (build-windows/build-linux) a GitHub Release (release) se spustí
-# jen při pushnutí tagu ve tvaru "v*" (např. v0.7, v0.7.1) - k tomu tagu se pak
-# přiloží Windows .exe a univerzální Linux AppImage.
+# jen při pushnutí tagu ve tvaru "v*" (např. v0.7, v0.7.1) - k tomu tagu se pak přiloží
+# Windows .exe, univerzální Linux AppImage (běží na jakékoliv distribuci) a Linux .deb
+# (pohodlná instalace se správnou registrací do menu na Debian/Ubuntu odvozených distro,
+# ale bez auto-update uvnitř appky - viz linux_run_mode()=="deb" v hlavním skriptu).
 
 on:
   push:
@@ -145,6 +147,58 @@ jobs:
           Categories=AudioVideo;Video;
           EOF
 
+      - name: Sestav .deb balíček (pohodlná instalace na Debian/Ubuntu odvozené distribuce)
+        run: |
+          VERSION_NUM="${GITHUB_REF_NAME#v}"
+          PKG_DIR="ffmpeg-master_${VERSION_NUM}_amd64"
+          mkdir -p "$PKG_DIR/DEBIAN" "$PKG_DIR/usr/bin" "$PKG_DIR/usr/share/applications" "$PKG_DIR/usr/share/icons/hicolor/256x256/apps"
+
+          cp dist/ffmpeg-master "$PKG_DIR/usr/bin/ffmpeg-master"
+          chmod 755 "$PKG_DIR/usr/bin/ffmpeg-master"
+          cp favicon.png "$PKG_DIR/usr/share/icons/hicolor/256x256/apps/ffmpeg-master.png"
+          cp ffmpeg-master.desktop "$PKG_DIR/usr/share/applications/ffmpeg-master.desktop"
+
+          cat > "$PKG_DIR/DEBIAN/control" << EOF
+          Package: ffmpeg-master
+          Version: ${VERSION_NUM}
+          Section: video
+          Priority: optional
+          Architecture: amd64
+          Maintainer: DaTT.cz <info@datt.cz>
+          Description: Davkovy konvertor videa pres FFmpeg
+           GUI nastroj pro davkove prekodovani videa pomoci FFmpeg/NVENC.
+          EOF
+
+          cat > "$PKG_DIR/DEBIAN/postinst" << 'EOF'
+          #!/bin/sh
+          set -e
+          if command -v update-desktop-database >/dev/null 2>&1; then
+              update-desktop-database /usr/share/applications || true
+          fi
+          if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+              gtk-update-icon-cache -f /usr/share/icons/hicolor || true
+          fi
+          exit 0
+          EOF
+          chmod 755 "$PKG_DIR/DEBIAN/postinst"
+
+          cat > "$PKG_DIR/DEBIAN/postrm" << 'EOF'
+          #!/bin/sh
+          set -e
+          if command -v update-desktop-database >/dev/null 2>&1; then
+              update-desktop-database /usr/share/applications || true
+          fi
+          exit 0
+          EOF
+          chmod 755 "$PKG_DIR/DEBIAN/postrm"
+
+          dpkg-deb --build --root-owner-group "$PKG_DIR" "FFMPEG_Master_${VERSION_NUM}_amd64.deb"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-deb
+          path: FFMPEG_Master_*_amd64.deb
+
       - name: Sestav AppImage (univerzální - běží na jakékoliv distribuci)
         run: |
           mkdir -p AppDir/usr/bin AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/256x256/apps
@@ -187,9 +241,15 @@ jobs:
           name: linux-appimage
           path: dist-linux-appimage
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-deb
+          path: dist-linux-deb
+
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             dist-windows/FFMPEG_Master.exe
             dist-linux-appimage/FFMPEG_Master-x86_64.AppImage
+            dist-linux-deb/*.deb

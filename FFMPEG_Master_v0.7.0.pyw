@@ -50,15 +50,30 @@ def resource_path(relative_path):
     return candidates[0]
 
 
+def _linux_user_config_dir():
+    """Standardní XDG adresář pro config.json u .deb instalace (~/.config/ffmpeg-master, nebo
+    $XDG_CONFIG_HOME). Binárka u .deb instalace leží v /usr/bin - sdílená mezi všemi uživateli
+    a bez rootu nezapisovatelná - takže na rozdíl od AppImage/přenosného buildu nejde config
+    ukládat vedle samotné binárky."""
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
+    return os.path.join(base, "ffmpeg-master")
+
+
 def base_dir():
     """Adresář, kam patří config.json (a dočasná složka pro auto-update) - obvykle vedle .exe
-    (frozen) nebo vedle .pyw (dev). Výjimka je Linux AppImage (viz linux_run_mode() níže) -
-    sys.executable by tam ukazoval do dočasného, read-only mount pointu (mění se při každém
-    spuštění), takže se použije adresář vedle samotného .AppImage souboru - stejná konvence jako
-    u přenosné .exe/.pyw (config jde vidět a upravovat vedle binárky, jde i přenést spolu s ní)."""
+    (frozen) nebo vedle .pyw (dev). Výjimky jsou Linux AppImage a .deb instalace (viz
+    linux_run_mode() níže): u AppImage by sys.executable ukazoval do dočasného, read-only mount
+    pointu (mění se při každém spuštění), takže se použije adresář vedle samotného .AppImage
+    souboru - stejná konvence jako u přenosné .exe/.pyw (config jde vidět a upravovat vedle
+    binárky, jde i přenést spolu s ní). U .deb instalace je binárka v /usr/bin (sdílená, bez
+    rootu nezapisovatelná), takže se použije standardní XDG adresář v domovské složce uživatele."""
     if getattr(sys, 'frozen', False):
-        if sys.platform != "win32" and linux_run_mode() == "appimage":
-            return os.path.dirname(os.path.abspath(os.environ["APPIMAGE"]))
+        if sys.platform != "win32":
+            mode = linux_run_mode()
+            if mode == "appimage":
+                return os.path.dirname(os.path.abspath(os.environ["APPIMAGE"]))
+            if mode == "deb":
+                return _linux_user_config_dir()
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
 
@@ -71,6 +86,11 @@ def linux_run_mode():
                    nastavuje samotný AppImage runtime při spuštění). sys.executable tu ukazuje do
                    dočasného mount pointu (mění se při každém spuštění) - pro .desktop Exec= i pro
                    auto-update je potřeba stabilní cesta k .AppImage souboru z proměnné APPIMAGE.
+    - "deb"      - nainstalováno přes .deb balíček (binárka leží v /usr/bin, kam ji dá dpkg).
+                   .desktop záznam a ikonu si přinese sám balíček (viz DEBIAN/postinst v CI) -
+                   sebe-registraci níže tedy netřeba spouštět. Auto-update se navíc chová jinak:
+                   binárka je v /usr/bin (root-owned), takže appka ji sama nepřepíše - jen upozorní
+                   a odkáže na stažení nového .deb (viz start_update_download).
     - "portable" - cokoliv jiného zmrazeného (ruční/lokální PyInstaller build spuštěný odkudkoliv) -
                    původní chování, cesta ze sys.executable.
     - "script"   - spuštěno jako .pyw/.py skript (vývoj), ne zmrazený build.
@@ -79,6 +99,9 @@ def linux_run_mode():
         return "script"
     if os.environ.get("APPIMAGE"):
         return "appimage"
+    exe = os.path.realpath(sys.executable)
+    if exe.startswith("/usr/") or exe.startswith("/opt/"):
+        return "deb"
     return "portable"
 
 
@@ -91,6 +114,11 @@ def ensure_linux_desktop_entry():
     ~/.local/share/icons/...). Bez rootu, jen do domovského adresáře uživatele; bezpečně se přeskočí
     (žádná chyba), pokud cokoliv selže - jde čistě o kosmetické vylepšení, ne o nutnou podmínku běhu."""
     mode = linux_run_mode()
+    if mode == "deb":
+        # .desktop záznam a ikonu si appka přinese už v .deb balíčku (system-wide v /usr/share/...
+        # - viz DEBIAN/postinst v CI), sebe-registrace do ~/.local/share by jen vytvořila druhou,
+        # zbytečnou položku v menu.
+        return
     try:
         data_home = os.environ.get("XDG_DATA_HOME") or os.path.join(os.path.expanduser("~"), ".local", "share")
         icons_dir = os.path.join(data_home, "icons", "hicolor", "256x256", "apps")
@@ -1146,6 +1174,19 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         if not getattr(sys, "frozen", False):
             # Vývojový/skriptový režim - automatická výměna souboru nedává smysl, otevři stránku s vydáním.
             self.log("Aktualizace: běžím jako .pyw skript, otevírám stránku s vydáním v prohlížeči.")
+            webbrowser.open(info["html_url"])
+            return
+        if sys.platform != "win32" and linux_run_mode() == "deb":
+            # .deb instalace: binárka je v /usr/bin (root-owned), appka ji sama nemůže přepsat bez
+            # oprávnění - místo tichého auto-update jen upozorní a odkáže na stažení nového balíčku
+            # (nová verze se pak nainstaluje stejně jako ta první - dvojklikem, nebo "sudo dpkg -i").
+            self.log("Aktualizace: nainstalováno přes .deb balíček, auto-update není podporován - otevírám stránku s vydáním.")
+            messagebox.showinfo(
+                "Aktualizace",
+                f"Aplikace je nainstalována přes .deb balíček, takže se neumí aktualizovat sama.\n\n"
+                f"Stáhni si nový .deb (verze {info['tag']}) z GitHubu a nainstaluj ho stejně jako "
+                f"poprvé (dvojklikem, nebo příkazem \"sudo dpkg -i <soubor>.deb\") - tím se aktualizace dokončí.\n\n"
+                f"Otevírám stránku s vydáním...")
             webbrowser.open(info["html_url"])
             return
         asset = self._pick_update_asset(info["assets"])
