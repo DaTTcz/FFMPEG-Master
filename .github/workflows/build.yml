@@ -1,11 +1,13 @@
 name: Build binaries
 
-# Sestavení (build-windows/build-linux) běží při KAŽDÉM pushnutí do main - funguje jako testovací
-# build, ať se chyby v pipeline (chybějící balíček, rozbitý PyInstaller krok apod.) odhalí hned,
-# ne až při tagu. Samotný GitHub Release (job "release") se ale vytvoří/aktualizuje jen při
-# pushnutí tagu ve tvaru "v*" (např. v0.7, v0.7.1) - k tomu tagu se pak přiloží Windows .exe
-# a univerzální Linux AppImage. Jde spustit i ručně (workflow_dispatch) se stejným efektem jako
-# push do main - jen sestaví, release nevytvoří/needituje.
+# Při KAŽDÉM pushnutí do main (nebo ručním spuštění bez tagu) proběhne jen rychlá
+# kontrola "quick-check" - nainstalují se závislosti a skript se zkompiluje
+# (python -m py_compile). Odhalí to syntax chyby i rozbité/chybějící závislosti
+# v requirements.txt, ale netrvá to minuty jako celý PyInstaller build.
+#
+# Skutečný build (build-windows/build-linux) a GitHub Release (release) se spustí
+# jen při pushnutí tagu ve tvaru "v*" (např. v0.7, v0.7.1) - k tomu tagu se pak
+# přiloží Windows .exe a univerzální Linux AppImage.
 
 on:
   push:
@@ -19,7 +21,38 @@ permissions:
   contents: write
 
 jobs:
+  quick-check:
+    if: "!startsWith(github.ref, 'refs/tags/v')"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Systémové závislosti pro Tkinter/Tk
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-tk tk-dev
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Najdi aktuální hlavní skript
+        id: main
+        run: |
+          FILE=$(ls FFMPEG_Master_v*.pyw | sort -V | tail -n1)
+          echo "Hlavní skript: $FILE"
+          echo "script=$FILE" >> "$GITHUB_OUTPUT"
+
+      - name: Zkompiluj skript (syntax + rychlá kontrola)
+        run: python -m py_compile "${{ steps.main.outputs.script }}"
+
   build-windows:
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -61,6 +94,7 @@ jobs:
           path: dist/FFMPEG_Master.exe
 
   build-linux:
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
