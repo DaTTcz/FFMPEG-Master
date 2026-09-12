@@ -485,6 +485,11 @@ class TrackSelectionDialog(ctk.CTkToplevel):
         self.geometry("820x640")
         self.minsize(700, 500)
         self.transient(parent)
+        # update_idletasks() před grab_set() - grab vyžaduje, aby okno bylo už "viewable"
+        # (namapované window managerem), což se nestane hned po vytvoření/geometry() ale až
+        # asynchronně. Bez tohohle grab_set() občas (podle přesného časování, viz stejný bug u
+        # AboutDialog) spadne na "grab failed: window not viewable".
+        self.update_idletasks()
         self.grab_set()
         self.resizable(True, True)
 
@@ -681,6 +686,7 @@ class SettingsDialog(ctk.CTkToplevel):
         self.title("Nastavení")
         self.geometry("640x760")
         self.transient(parent)
+        self.update_idletasks()  # ať je okno "viewable", než se zavolá grab_set() (viz AboutDialog)
         self.grab_set()
         self.resizable(False, True)
         cfg = app.cfg
@@ -883,6 +889,12 @@ class AboutDialog(ctk.CTkToplevel):
         self.title("O programu")
         self.geometry("380x420")
         self.transient(parent)
+        # update_idletasks() před grab_set() - bez tohohle grab_set() u zavolání z některých míst
+        # (např. kliknutí na banner "dostupná nová verze") spadne na _tkinter.TclError: "grab
+        # failed: window not viewable", protože okno ještě nestihlo být window managerem
+        # namapované/viditelné, když grab_set() běží hned za sebou. update_idletasks() zpracuje
+        # čekající geometry/map požadavky, takže grab_set() pak už narazí na skutečně existující okno.
+        self.update_idletasks()
         self.grab_set()
         self.resizable(False, False)
 
@@ -917,6 +929,13 @@ class AboutDialog(ctk.CTkToplevel):
         ctk.CTkButton(self, text="Zavřít", fg_color="#555555", command=self.destroy).pack(pady=(4, 12))
 
         ctk.CTkLabel(self, text="Licence: PolyForm Noncommercial License 1.0.0", font=("Arial", 9), text_color="#3a3a3a").pack(side="bottom", pady=(0, 8))
+
+        # Pokud appka už dřív zjistila novou verzi (proto se vůbec zobrazil banner "dostupná nová
+        # verze" na hlavním okně - viz _startup_update_check), rovnou tu informaci ukaž/nabídni
+        # update - ať uživatel nemusí po kliknutí na banner ještě jednou ručně mačkat "Zkontrolovat
+        # aktualizace" a čekat na nový dotaz na GitHub, když appka tu odpověď už má.
+        if getattr(self.app, "_pending_update_info", None):
+            self.after(50, lambda: self._show_result(self.app._pending_update_info))
 
     def manual_check(self):
         self.status_label.configure(text="Kontroluji...")
@@ -1046,7 +1065,14 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         w, h = 450, 380
         x = (self.winfo_screenwidth() // 2) - (w // 2)
         y = (self.winfo_screenheight() // 2) - (h // 2)
+        # minsize/maxsize na stejnou hodnotu jako geometry - bez toho customtkinter/WM okno umí
+        # hned po vytvoření přeplácnout na jinou (větší) velikost, i když je geometry() nastavená
+        # explicitně natvrdo hned za sebou. S tímhle je 450x380 vynucená, dokud ji _build_main_ui()
+        # po doběhnutí animace záměrně neuvolní zpět na (1, 1)/(screen) a nenastaví uloženou velikost.
+        self.minsize(w, h)
+        self.maxsize(w, h)
         self.geometry(f"{w}x{h}+{x}+{y}")
+        self.update_idletasks()
 
         splash_frame = ctk.CTkFrame(self, fg_color="#1a1a1a")
         splash_frame.pack(fill="both", expand=True)
@@ -1087,7 +1113,11 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         splash_frame.destroy()
 
     def _build_main_ui(self):
-        # Roztáhni okno z malé splash velikosti na uloženou velikost skutečného UI.
+        # Uvolni vynucenou splash velikost (viz _show_splash()) a roztáhni okno na uloženou
+        # velikost skutečného UI. Tk nemá "zruš maxsize" - nastav ho zpátky na velikost obrazovky
+        # (efektivně bez omezení), minsize (700, 500) je rozumné minimum pro hlavní okno.
+        self.maxsize(self.winfo_screenwidth(), self.winfo_screenheight())
+        self.minsize(700, 500)
         self.geometry(self.cfg.get("window_geometry", "750x740"))
 
         self._build_menu()
