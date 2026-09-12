@@ -991,7 +991,9 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         ctk.set_appearance_mode(self.cfg.get("theme", "dark"))
 
         self.title(f"FFMPEG Master {VERSION}")
-        self.geometry(self.cfg.get("window_geometry", "750x740"))
+        # Velikost/pozice okna na uloženou hodnotu z configu se nastaví až v _build_main_ui() -
+        # po dobu splash animace (_show_splash() níže) má okno svou vlastní menší velikost, ať
+        # nevypadá jako prázdné plátno, a teprve po jejím doběhnutí se "roztáhne" na skutečné UI.
 
         try:
             if sys.platform == "win32":
@@ -1037,7 +1039,15 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
 
     def _show_splash(self):
         """Vykreslí úvodní logo/verzi/progress bar přímo do hlavního okna a chvíli animuje (stejný
-        obsah/animace jako dřívější samostatné SplashScreen okno) - viz komentář v __init__ výše."""
+        obsah/animace jako dřívější samostatné SplashScreen okno) - viz komentář v __init__ výše.
+        Okno má po dobu animace menší, přesně padnoucí velikost (stejné rozměry jako dřívější
+        samostatné splash okno) místo aby se hned otevřelo v uložené velikosti hlavního UI -
+        na tu se "roztáhne" až _build_main_ui() po doběhnutí animace."""
+        w, h = 450, 380
+        x = (self.winfo_screenwidth() // 2) - (w // 2)
+        y = (self.winfo_screenheight() // 2) - (h // 2)
+        self.geometry(f"{w}x{h}+{x}+{y}")
+
         splash_frame = ctk.CTkFrame(self, fg_color="#1a1a1a")
         splash_frame.pack(fill="both", expand=True)
 
@@ -1077,6 +1087,9 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         splash_frame.destroy()
 
     def _build_main_ui(self):
+        # Roztáhni okno z malé splash velikosti na uloženou velikost skutečného UI.
+        self.geometry(self.cfg.get("window_geometry", "750x740"))
+
         self._build_menu()
 
         # --- UI ---
