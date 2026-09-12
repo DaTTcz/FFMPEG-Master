@@ -1163,12 +1163,14 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
 
     @staticmethod
     def _pick_update_asset(assets):
-        """Vybere release asset odpovídající aktuální platformě. Windows build z CI se jmenuje
-        '*.exe', Linux build univerzální '*.AppImage'."""
+        """Vybere release asset odpovídající aktuální platformě/způsobu instalace. Windows build
+        z CI se jmenuje '*.exe', Linux AppImage/přenosný build '*.AppImage', Linux .deb instalace
+        '*.deb' (viz linux_run_mode())."""
         if sys.platform == "win32":
             return next((a for a in assets if (a.get("name") or "").lower().endswith(".exe")), None)
-        else:
-            return next((a for a in assets if (a.get("name") or "").lower().endswith(".appimage")), None)
+        if linux_run_mode() == "deb":
+            return next((a for a in assets if (a.get("name") or "").lower().endswith(".deb")), None)
+        return next((a for a in assets if (a.get("name") or "").lower().endswith(".appimage")), None)
 
     def start_update_download(self, info):
         if not getattr(sys, "frozen", False):
@@ -1176,26 +1178,60 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             self.log("Aktualizace: běžím jako .pyw skript, otevírám stránku s vydáním v prohlížeči.")
             webbrowser.open(info["html_url"])
             return
-        if sys.platform != "win32" and linux_run_mode() == "deb":
-            # .deb instalace: binárka je v /usr/bin (root-owned), appka ji sama nemůže přepsat bez
-            # oprávnění - místo tichého auto-update jen upozorní a odkáže na stažení nového balíčku
-            # (nová verze se pak nainstaluje stejně jako ta první - dvojklikem, nebo "sudo dpkg -i").
-            self.log("Aktualizace: nainstalováno přes .deb balíček, auto-update není podporován - otevírám stránku s vydáním.")
-            messagebox.showinfo(
-                "Aktualizace",
-                f"Aplikace je nainstalována přes .deb balíček, takže se neumí aktualizovat sama.\n\n"
-                f"Stáhni si nový .deb (verze {info['tag']}) z GitHubu a nainstaluj ho stejně jako "
-                f"poprvé (dvojklikem, nebo příkazem \"sudo dpkg -i <soubor>.deb\") - tím se aktualizace dokončí.\n\n"
-                f"Otevírám stránku s vydáním...")
-            webbrowser.open(info["html_url"])
-            return
         asset = self._pick_update_asset(info["assets"])
         if not asset:
-            plat_name = "Windows (.exe)" if sys.platform == "win32" else "Linux (.AppImage)"
+            if sys.platform == "win32":
+                plat_name = "Windows (.exe)"
+            elif linux_run_mode() == "deb":
+                plat_name = "Linux (.deb)"
+            else:
+                plat_name = "Linux (.AppImage)"
             messagebox.showwarning("Aktualizace", f"V nejnovějším vydání nebyl nalezen soubor pro tuto platformu ({plat_name}). Otevírám stránku s vydáním.")
             webbrowser.open(info["html_url"])
             return
+        if sys.platform != "win32" and linux_run_mode() == "deb":
+            # .deb instalace: binárka je v /usr/bin (root-owned), appka ji sama nemůže přepsat bez
+            # oprávnění - stáhne nový .deb a instalaci provede přes pkexec (systémové heslové okno,
+            # stejné jako u jakéhokoliv jiného zásahu vyžadujícího root na Linuxu).
+            threading.Thread(target=self._download_and_install_deb, args=(asset,), daemon=True).start()
+            return
         threading.Thread(target=self._download_and_install, args=(asset,), daemon=True).start()
+
+    def _download_and_install_deb(self, asset):
+        try:
+            update_dir = os.path.join(base_dir(), "update")
+            os.makedirs(update_dir, exist_ok=True)
+            new_path = os.path.join(update_dir, asset["name"])
+            self.log(f"Stahuji aktualizaci: {asset['name']}...")
+            urllib.request.urlretrieve(asset["url"], new_path)
+            self.log("Stažení dokončeno, instaluji (vyžádá heslo přes systémový dialog)...")
+
+            result = subprocess.run(["pkexec", "dpkg", "-i", new_path], capture_output=True, text=True)
+            if result.returncode != 0:
+                err = (result.stderr or "").strip()
+                self.log(f"CHYBA při instalaci .deb (kód {result.returncode}): {err}", error=True)
+                self.after(0, lambda: messagebox.showerror(
+                    "Aktualizace selhala",
+                    "Instalace nového balíčku se nezdařila"
+                    + (f":\n\n{err[:500]}" if err else " (uživatel zrušil heslové okno?).")
+                    + f"\n\nBalíček zůstal stažený zde:\n{new_path}\n\nJde ho zkusit nainstalovat ručně: sudo dpkg -i \"{new_path}\""
+                ))
+                return
+
+            self.log("Aktualizace nainstalována, spouštím novou verzi...")
+            # sys.executable je u .deb instalace stabilní cesta (/usr/bin/ffmpeg-master) - dpkg ji
+            # právě přepsal na místě, takže jde rovnou znovu spustit stejnou cestou.
+            subprocess.Popen([sys.executable], start_new_session=True)
+            self.after(0, self.destroy)
+        except FileNotFoundError:
+            self.log("CHYBA: pkexec nenalezen (chybí balíček policykit-1?).", error=True)
+            self.after(0, lambda: messagebox.showerror(
+                "Aktualizace selhala",
+                "Nástroj pro instalaci s oprávněním (pkexec) nebyl na systému nalezen.\n\n"
+                "Stáhni si nový .deb ručně z GitHubu a nainstaluj ho příkazem \"sudo dpkg -i <soubor>.deb\"."))
+        except Exception as e:
+            self.log(f"CHYBA při aktualizaci: {e}", error=True)
+            self.after(0, lambda: messagebox.showerror("Aktualizace selhala", str(e)))
 
     def _download_and_install(self, asset):
         try:
