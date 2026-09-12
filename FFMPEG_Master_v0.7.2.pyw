@@ -17,7 +17,7 @@ import customtkinter as ctk
 from tkinter import messagebox, Listbox, filedialog, EXTENDED, Menu
 from tkinterdnd2 import DND_FILES, TkinterDnD
 
-VERSION = "v0.7.1"
+VERSION = "v0.7.2"
 GITHUB_REPO = "DaTTcz/FFMPEG-Master"
 
 # --- OPRAVA IKONY V LIŠTĚ WINDOWS ---
@@ -469,58 +469,6 @@ def is_network_path(path):
         return False
     except Exception:
         return False
-
-
-# ==========================================================================
-#  SPLASH SCREEN
-# ==========================================================================
-
-class SplashScreen(ctk.CTkToplevel):
-    def __init__(self, parent):
-        super().__init__(parent)
-        self.overrideredirect(True)
-        w, h = 450, 380
-        x = (self.winfo_screenwidth() // 2) - (w // 2)
-        y = (self.winfo_screenheight() // 2) - (h // 2)
-        self.geometry(f"{w}x{h}+{x}+{y}")
-        self.configure(fg_color="#1a1a1a")
-
-        logo_loaded = False
-        if HAS_PILLOW:
-            try:
-                img_path = resource_path("favicon.png")
-                if os.path.exists(img_path):
-                    img_raw = Image.open(img_path)
-                    logo_img = ctk.CTkImage(light_image=img_raw, dark_image=img_raw, size=(160, 160))
-                    self.logo_label = ctk.CTkLabel(self, image=logo_img, text="")
-                    self.logo_label.pack(pady=(30, 10))
-                    logo_loaded = True
-                else:
-                    print(f"[FFMPEG Master] Logo nenalezeno: {img_path}", file=sys.stderr)
-            except Exception as e:
-                print(f"[FFMPEG Master] Načtení loga selhalo ({img_path if 'img_path' in locals() else '?'}): {e}", file=sys.stderr)
-
-        if not logo_loaded:
-            self.logo_label = ctk.CTkLabel(self, text=f"FFMPEG Master {VERSION}", font=("Arial", 32, "bold"), text_color="#1f538d")
-            self.logo_label.pack(pady=(60, 20))
-
-        ctk.CTkLabel(self, text=f"FFMPEG Master {VERSION}", font=("Arial", 16, "bold"), text_color="#28a745").pack(pady=(5, 0))
-        ctk.CTkLabel(self, text="©2026 David Trubka", font=("Arial", 10, "italic"), text_color="#2871a7").pack(pady=(0, 5))
-        self.label_status = ctk.CTkLabel(self, text="Inicializace...", font=("Arial", 11, "italic"), text_color="gray")
-        self.label_status.pack(pady=(20, 0))
-        self.prog = ctk.CTkProgressBar(self, width=350, height=4, progress_color="#1f538d")
-        self.prog.pack(pady=20)
-        self.prog.set(0)
-
-    def run_progress(self):
-        quotes = ["Inicializace kodeků...", "Detekce CUDA jader...", "Příprava FFmpeg...", "Optimalizace procesů...", "Vše je připraveno!"]
-        for i in range(1, 101):
-            self.prog.set(i / 100)
-            idx = min((i - 1) * len(quotes) // 100, len(quotes) - 1)
-            self.label_status.configure(text=quotes[idx])
-            self.update()
-            time.sleep(0.06)
-        self.destroy()
 
 
 # ==========================================================================
@@ -1030,15 +978,6 @@ def check_for_updates(repo):
 class App(ctk.CTk, TkinterDnD.DnDWrapper):
     def __init__(self):
         super().__init__()
-        # Skryj hlavní okno hned od začátku - musí to být úplně první věc po super().__init__(),
-        # jinak se stihne na zlomek vteřiny zobrazit celé nedostavěné (prázdné/blikající), než se
-        # sestaví všechny widgety níže. Použit withdraw() místo průhlednosti (alpha=0) - ta se na
-        # X11 spoléhá na kompozitor a bez něj (nebo než WM požadavek na průhlednost stihne
-        # zpracovat) okno chvíli problikne stejně jako bez fixu. withdraw() okno rovnou nezobrazí
-        # vůbec, bez závislosti na kompozitoru. Splash screen níže je sice Toplevel s parent=self,
-        # ale withdraw rodiče nemá na už vytvořené/budoucí Toplevel okno žádný vliv - jde o
-        # samostatné top-level X11 okno, jen logicky "vlastněné" hlavním oknem.
-        self.withdraw()
         try:
             self.TkdndVersion = TkinterDnD._require(self)
             self.dnd_available = True
@@ -1089,6 +1028,55 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self.run_completed = False
         self.queue = []  # list of dict - viz add_file()
 
+        # Úvodní "loading" obsah přímo v tomhle (jediném) okně - žádné druhé Toplevel okno se
+        # samostatným zobrazováním/skrýváním, které se na různých linuxových WM/kompozitorech
+        # chovalo nespolehlivě (viz historie oprav výše/BUILD.md). Okno se ukáže hned normálně,
+        # animace doběhne, obsah se zahodí a nahradí skutečným UI (_build_main_ui() níže).
+        self._show_splash()
+        self._build_main_ui()
+
+    def _show_splash(self):
+        """Vykreslí úvodní logo/verzi/progress bar přímo do hlavního okna a chvíli animuje (stejný
+        obsah/animace jako dřívější samostatné SplashScreen okno) - viz komentář v __init__ výše."""
+        splash_frame = ctk.CTkFrame(self, fg_color="#1a1a1a")
+        splash_frame.pack(fill="both", expand=True)
+
+        logo_loaded = False
+        if HAS_PILLOW:
+            try:
+                img_path = resource_path("favicon.png")
+                if os.path.exists(img_path):
+                    img_raw = Image.open(img_path)
+                    logo_img = ctk.CTkImage(light_image=img_raw, dark_image=img_raw, size=(160, 160))
+                    ctk.CTkLabel(splash_frame, image=logo_img, text="").pack(pady=(30, 10))
+                    logo_loaded = True
+                else:
+                    print(f"[FFMPEG Master] Logo nenalezeno: {img_path}", file=sys.stderr)
+            except Exception as e:
+                print(f"[FFMPEG Master] Načtení loga selhalo: {e}", file=sys.stderr)
+        if not logo_loaded:
+            ctk.CTkLabel(splash_frame, text=f"FFMPEG Master {VERSION}", font=("Arial", 32, "bold"), text_color="#1f538d").pack(pady=(60, 20))
+
+        ctk.CTkLabel(splash_frame, text=f"FFMPEG Master {VERSION}", font=("Arial", 16, "bold"), text_color="#28a745").pack(pady=(5, 0))
+        ctk.CTkLabel(splash_frame, text="©2026 David Trubka", font=("Arial", 10, "italic"), text_color="#2871a7").pack(pady=(0, 5))
+        label_status = ctk.CTkLabel(splash_frame, text="Inicializace...", font=("Arial", 11, "italic"), text_color="gray")
+        label_status.pack(pady=(20, 0))
+        prog = ctk.CTkProgressBar(splash_frame, width=350, height=4, progress_color="#1f538d")
+        prog.pack(pady=20)
+        prog.set(0)
+        self.update()
+
+        quotes = ["Inicializace kodeků...", "Detekce CUDA jader...", "Příprava FFmpeg...", "Optimalizace procesů...", "Vše je připraveno!"]
+        for i in range(1, 101):
+            prog.set(i / 100)
+            idx = min((i - 1) * len(quotes) // 100, len(quotes) - 1)
+            label_status.configure(text=quotes[idx])
+            self.update()
+            time.sleep(0.06)
+
+        splash_frame.destroy()
+
+    def _build_main_ui(self):
         self._build_menu()
 
         # --- UI ---
@@ -1851,8 +1839,7 @@ rm -f "{sh_path}"
 
 
 if __name__ == "__main__":
-    app = App()  # hlavní okno je při __init__ hned na začátku skryté přes withdraw() (viz výše)
-    splash = SplashScreen(app)
-    splash.run_progress()
-    app.deiconify()
+    # Splash animace i skutečné UI se sestaví uvnitř App.__init__ (viz _show_splash()/
+    # _build_main_ui() výše) - jde pořád o to samé okno, nic se tu už neschovává/neodkrývá.
+    app = App()
     app.mainloop()
