@@ -528,6 +528,36 @@ def _smb_to_local_path(host, share, rest, mounts_file="/proc/mounts", gvfs_dirs=
     return None
 
 
+def _kio_fuse_mount(url, timeout=45):
+    """Požádá službu kio-fuse (KDE) o zpřístupnění KIO adresy (smb://, sftp://, ftp://...) jako
+    lokální cesty - stejné D-Bus volání, jaké KDE samo používá při "Otevřít pomocí" v aplikaci,
+    která KIO nezná. Dolphin při drag&drop takovou cestu neposílá (jen původní URL), proto to
+    appka udělá sama. Přihlašovací údaje bere kio-fuse z KDE (KWallet) - případně se zeptá dialogem,
+    proto delší timeout. Vrací lokální cestu, nebo None (kio-fuse není / URL nešlo připojit)."""
+    commands = []
+    if shutil.which("gdbus"):
+        commands.append(["gdbus", "call", "--session", "--dest", "org.kde.KIOFuse",
+                         "--object-path", "/org/kde/KIOFuse", "--method", "org.kde.KIOFuse.VFS.mountUrl", url])
+    if shutil.which("dbus-send"):
+        commands.append(["dbus-send", "--session", "--print-reply", "--type=method_call",
+                         "--dest=org.kde.KIOFuse", "/org/kde/KIOFuse",
+                         "org.kde.KIOFuse.VFS.mountUrl", "string:" + url])
+    for cmd in commands:
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                                 errors="replace", timeout=timeout)
+        except Exception:
+            continue
+        if res.returncode != 0:
+            continue
+        # gdbus:     ('/run/user/1000/kio-fuse-XXXX/smb/...',)
+        # dbus-send: method return ...\n   string "/run/user/1000/kio-fuse-XXXX/smb/..."
+        m = re.search(r"\('(.*)',\)", res.stdout, re.S) or re.search(r'string "(.*)"', res.stdout, re.S)
+        if m and os.path.exists(m.group(1)):
+            return m.group(1)
+    return None
+
+
 def resolve_dropped_path(item):
     """Převede položku z drag&drop na lokální cestu. Vrací (cesta, None) nebo (None, "důvod").
 
@@ -551,11 +581,18 @@ def resolve_dropped_path(item):
         local = _smb_to_local_path(host, share, rest)
         if local:
             return os.path.normpath(local), None
+    if sys.platform != "win32":
+        # Není připojené klasicky ani přes GVFS - zkus kio-fuse (KDE). Funguje i pro sftp:// apod.
+        local = _kio_fuse_mount(item)
+        if local:
+            return os.path.normpath(local), None
+    if scheme in ("smb", "cifs"):
         return None, (f"soubor je na síťovém sdílení \\\\{host}\\{share}, které není připojené jako složka "
-                      f"(správce souborů poslal jen adresu smb://). Připoj sdílení do systému (CIFS mount, "
-                      f"na KDE balíček kio-fuse, na GNOME/Mint stačí otevřít sdílení ve správci souborů) "
-                      f"a přetáhni soubor z připojené složky.")
-    return None, f"nepodporovaný typ adresy {scheme}:// - přetáhni soubor z lokální nebo připojené složky"
+                      f"(správce souborů poslal jen adresu smb://). Připoj sdílení do systému (CIFS mount / fstab), "
+                      f"na KDE nainstaluj balíček kio-fuse, na GNOME/Mint otevři sdílení ve správci souborů "
+                      f"- a pak soubor přetáhni znovu.")
+    return None, (f"nepodporovaný typ adresy {scheme}:// - přetáhni soubor z lokální nebo připojené složky "
+                  f"(na KDE pomůže balíček kio-fuse)")
 
 
 def default_selection(streams, auto_langs, fallback_to_others):
@@ -639,8 +676,31 @@ def force_copy_video(encode_args):
 DRIVE_REMOTE = 4  # Windows GetDriveTypeW konstanta pro síťovou jednotku
 
 
+# Souborové systémy, které na Linuxu znamenají "soubor je na síti" (CIFS/SMB, NFS, a FUSE
+# zprostředkovatelé síťových protokolů: GVFS na GNOME/Mint, kio-fuse na KDE, sshfs, rclone).
+_LINUX_NETWORK_FS = ("cifs", "smb3", "smbfs", "nfs", "nfs4", "9p", "fuse.gvfsd-fuse", "fuse.kio-fuse",
+                     "fuse.sshfs", "fuse.rclone", "fuse.davfs", "davfs")
+
+
+def _linux_mount_fstype(path, mounts_file="/proc/mounts"):
+    """Typ souborového systému, na kterém cesta leží (nejdelší shodný mount point)."""
+    real = os.path.realpath(path)
+    best, best_type = "", None
+    with open(mounts_file, "r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            parts = line.split()
+            if len(parts) < 3:
+                continue
+            mnt = _unescape_mount_field(parts[1]).rstrip("/") or "/"
+            if (real == mnt or real.startswith(mnt.rstrip("/") + "/")) and len(mnt) > len(best):
+                best, best_type = mnt, parts[2]
+    return best_type
+
+
 def is_network_path(path):
-    """True pro UNC cesty (\\\\server\\share\\...) i pro mapované síťové jednotky (Z:\\...)."""
+    """True pro UNC cesty (\\\\server\\share\\...) i pro mapované síťové jednotky (Z:\\...) na Windows;
+    na Linuxu pro soubory na síťovém souborovém systému (CIFS, NFS, GVFS, kio-fuse, sshfs...).
+    Podle toho se volí source_action_network místo source_action_local."""
     try:
         abspath = os.path.abspath(path)
         if abspath.startswith("\\\\") or abspath.startswith("//"):
@@ -649,7 +709,8 @@ def is_network_path(path):
             drive = os.path.splitdrive(abspath)[0]
             if drive:
                 return ctypes.windll.kernel32.GetDriveTypeW(drive + "\\") == DRIVE_REMOTE
-        return False
+            return False
+        return (_linux_mount_fstype(abspath) or "") in _LINUX_NETWORK_FS
     except Exception:
         return False
 
