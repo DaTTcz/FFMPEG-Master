@@ -58,7 +58,7 @@ pip install -r requirements.txt
 ## Spuštění ze zdrojového kódu
 
 ```bash
-python FFMPEG_Master_v0.7.4.pyw
+python FFMPEG_Master_v0.7.5.pyw
 ```
 
 Při prvním spuštění se vedle scriptu (nebo vedle zabalené binárky/AppImage; u instalace z `.deb`/`.rpm` v `~/.config/ffmpeg-master/`, viz [BUILD.md](BUILD.md)) vytvoří `config.json` s výchozími hodnotami — uprav si ho přes menu **Nastavení** v aplikaci, nebo ručně (vzor v [config.example.json](config.example.json)).

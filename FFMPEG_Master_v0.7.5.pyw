@@ -12,12 +12,14 @@ import tempfile
 import webbrowser
 import urllib.request
 import urllib.error
+import urllib.parse
+import socket
 import ctypes
 import customtkinter as ctk
 from tkinter import messagebox, Listbox, filedialog, EXTENDED, Menu
 from tkinterdnd2 import DND_FILES, TkinterDnD
 
-VERSION = "v0.7.4"
+VERSION = "v0.7.5"
 GITHUB_REPO = "DaTTcz/FFMPEG-Master"
 
 
@@ -447,6 +449,113 @@ def probe_file(file_path, ffprobe_path):
     if video is None:
         return None, "soubor neobsahuje žádnou video stopu"
     return {"duration": duration, "video": video, "audio_streams": audio_streams, "sub_streams": sub_streams}, None
+
+
+# ==========================================================================
+#  PŘETAŽENÉ SOUBORY - převod URL (file://, smb://) na lokální cestu
+# ==========================================================================
+
+VIDEO_EXTENSIONS = ('.mkv', '.mp4', '.avi', '.mov', '.ts', '.m2ts', '.wmv', '.flv', '.webm', '.m4v')
+
+
+def _same_host(a, b):
+    """Porovná dva názvy/adresy serveru - "192.168.1.2" vs. "nas" vs. "NAS.local" apod."""
+    a, b = (a or "").lower().strip("[]"), (b or "").lower().strip("[]")
+    if not a or not b:
+        return False
+    if a == b or a.split(".")[0] == b.split(".")[0] and not a.replace(".", "").isdigit():
+        return True
+    try:
+        return socket.gethostbyname(a) == socket.gethostbyname(b)
+    except Exception:
+        return False
+
+
+def _unescape_mount_field(value):
+    """/proc/mounts kóduje mezery a spol. oktalově (\\040) - vrátí původní text."""
+    return re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), value)
+
+
+def _smb_to_local_path(host, share, rest, mounts_file="/proc/mounts", gvfs_dirs=None):
+    """Najde lokální cestu k souboru na SMB sdílení, pokud je sdílení připojené:
+    1) klasický CIFS mount (mount -t cifs, fstab, autofs, vlastní mount skripty) - z /proc/mounts,
+    2) GVFS (GNOME, Cinnamon/Mint, XFCE) - /run/user/<uid>/gvfs/smb-share:server=...,share=...
+    Vrací cestu, nebo None."""
+    rest = rest.strip("/")
+    try:
+        with open(mounts_file, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) < 3 or parts[2] not in ("cifs", "smb3", "smbfs"):
+                    continue
+                source = _unescape_mount_field(parts[0]).replace("\\", "/")
+                mountpoint = _unescape_mount_field(parts[1])
+                m = re.match(r"^//([^/]+)/([^/]+)(?:/(.*))?$", source)
+                if not m or not _same_host(m.group(1), host) or m.group(2).lower() != share.lower():
+                    continue
+                subdir = (m.group(3) or "").strip("/")
+                if subdir:
+                    if rest.lower() != subdir.lower() and not rest.lower().startswith(subdir.lower() + "/"):
+                        continue
+                    rel = rest[len(subdir):].lstrip("/")
+                else:
+                    rel = rest
+                candidate = os.path.join(mountpoint, rel)
+                if os.path.exists(candidate):
+                    return candidate
+    except Exception:
+        pass
+
+    if gvfs_dirs is None:
+        gvfs_dirs = []
+        if hasattr(os, "getuid"):
+            gvfs_dirs.append(f"/run/user/{os.getuid()}/gvfs")
+        gvfs_dirs.append(os.path.join(os.path.expanduser("~"), ".gvfs"))
+    for gvfs in gvfs_dirs:
+        try:
+            entries = os.listdir(gvfs)
+        except Exception:
+            continue
+        for entry in entries:
+            if not entry.startswith("smb-share:"):
+                continue
+            opts = dict(kv.split("=", 1) for kv in entry[len("smb-share:"):].split(",") if "=" in kv)
+            if _same_host(urllib.parse.unquote(opts.get("server", "")), host) and \
+                    urllib.parse.unquote(opts.get("share", "")).lower() == share.lower():
+                candidate = os.path.join(gvfs, entry, rest)
+                if os.path.exists(candidate):
+                    return candidate
+    return None
+
+
+def resolve_dropped_path(item):
+    """Převede položku z drag&drop na lokální cestu. Vrací (cesta, None) nebo (None, "důvod").
+
+    Správce souborů nemusí posílat cestu, ale URL: file:///home/... (některá prostředí), nebo
+    smb://uzivatel@server/sdileni/... - typicky Dolphin (KDE) u souborů ze síťového umístění
+    otevřeného přímo v okně, bez připojení do systému. Takové URL ffprobe/ffmpeg neotevřou
+    spolehlivě a zbytek appky (výstup, přesun/přejmenování zdroje) s ním pracovat vůbec nemůže.
+    Proto se smb:// převede na cestu v už připojeném sdílení (CIFS mount / GVFS), a když žádné
+    není, vrátí se srozumitelný důvod."""
+    if "://" not in item:
+        return os.path.normpath(item), None
+    parsed = urllib.parse.urlparse(item)
+    scheme = parsed.scheme.lower()
+    if scheme == "file":
+        return os.path.normpath(urllib.parse.unquote(parsed.path)), None
+    if scheme in ("smb", "cifs"):
+        host = parsed.hostname or ""
+        path_parts = urllib.parse.unquote(parsed.path).lstrip("/").split("/", 1)
+        share = path_parts[0]
+        rest = path_parts[1] if len(path_parts) > 1 else ""
+        local = _smb_to_local_path(host, share, rest)
+        if local:
+            return os.path.normpath(local), None
+        return None, (f"soubor je na síťovém sdílení \\\\{host}\\{share}, které není připojené jako složka "
+                      f"(správce souborů poslal jen adresu smb://). Připoj sdílení do systému (CIFS mount, "
+                      f"na KDE balíček kio-fuse, na GNOME/Mint stačí otevřít sdílení ve správci souborů) "
+                      f"a přetáhni soubor z připojené složky.")
+    return None, f"nepodporovaný typ adresy {scheme}:// - přetáhni soubor z lokální nebo připojené složky"
 
 
 def default_selection(streams, auto_langs, fallback_to_others):
@@ -1552,10 +1661,16 @@ rm -f "{sh_path}"
         except Exception:
             matches = re.findall(r'\{(.*?)\}|(\S+)', event.data)
             raw_paths = [m[0] if m[0] else m[1] for m in matches]
-        valid = [os.path.normpath(p) for p in raw_paths
-                 if p.lower().endswith(('.mkv', '.mp4', '.avi', '.mov', '.ts', '.m2ts', '.wmv', '.flv', '.webm', '.m4v'))]
         self._maybe_clear_log()
-        for path in valid:
+        for raw in raw_paths:
+            if not raw.lower().endswith(VIDEO_EXTENSIONS):
+                continue
+            path, reason = resolve_dropped_path(raw)
+            if path is None:
+                name = urllib.parse.unquote(raw.rstrip("/").rsplit("/", 1)[-1])
+                self.log(f"[CHYBA] Nelze přidat soubor: {name}", error=True)
+                self.log(f"        Důvod: {reason}", error=True)
+                continue
             self.add_file(path)
 
     def browse_files(self):
