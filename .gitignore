@@ -11,11 +11,16 @@ env/
 build/
 dist/
 *.spec
+!packaging/linux/ffmpeg-master.spec
 
 # Ruční lokální AppImage build (v0.7 distribuce) - viz BUILD.md
 AppDir/
 squashfs-root/
 appimagetool*.AppImage
+
+# Linux balíčky (nfpm) - vznikají v CI
+*.deb
+*.rpm
 *.AppImage
 
 # Lokální konfigurace (v0.5) - obsahuje konkrétní cesty na disku uživatele

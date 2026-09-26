@@ -1,0 +1,62 @@
+# Popis .deb a .rpm balíčku pro nfpm (https://nfpm.goreleaser.com).
+# Z jednoho popisu vzniknou oba formáty ze stejné PyInstaller binárky - viz build.yml:
+#   VERSION=0.7.4 nfpm package -f packaging/linux/nfpm.yaml -p deb -t ...
+#   VERSION=0.7.4 nfpm package -f packaging/linux/nfpm.yaml -p rpm -t ...
+# Cesty jsou relativní ke kořeni repozitáře (odtud se nfpm spouští).
+
+name: ffmpeg-master
+arch: amd64
+platform: linux
+version: ${VERSION}
+release: 1
+section: video
+priority: optional
+maintainer: DaTT.cz <david@datt.cz>
+vendor: DaTT.cz
+homepage: https://github.com/DaTTcz/FFMPEG-Master
+license: PolyForm-Noncommercial-1.0.0
+description: |-
+  Dávkový konvertor videa přes FFmpeg.
+  GUI nástroj pro dávkové překódování videa pomocí FFmpeg/NVENC
+  (výběr audio a titulkových stop, loudnorm, NFO).
+
+contents:
+  - src: dist/ffmpeg-master
+    dst: /usr/bin/ffmpeg-master
+    file_info:
+      mode: 0755
+  - src: packaging/linux/ffmpeg-master.desktop
+    dst: /usr/share/applications/ffmpeg-master.desktop
+    file_info:
+      mode: 0644
+  - src: favicon.png
+    dst: /usr/share/icons/hicolor/256x256/apps/ffmpeg-master.png
+    file_info:
+      mode: 0644
+
+scripts:
+  postinstall: packaging/linux/postinst.sh
+  postremove: packaging/linux/postinst.sh
+
+# Závislosti: systémový ffmpeg (appka ho jen spouští) a knihovny písem, které se záměrně
+# nepřibalují (viz EXCLUDE_LIBS v ffmpeg-master.spec).
+overrides:
+  deb:
+    depends:
+      - ffmpeg
+      - libfontconfig1
+      - libfreetype6
+    recommends:
+      - pkexec | policykit-1
+  rpm:
+    # Na Fedoře i openSUSE se balíček s ffmpeg jmenuje jinak (ffmpeg-free, ffmpeg z RPM Fusion,
+    # ffmpeg-7/ffmpeg-8 z Packmanu...) - závislost na souboru sedí na všechny varianty.
+    depends:
+      - /usr/bin/ffmpeg
+      - /usr/bin/ffprobe
+      - libfontconfig.so.1()(64bit)
+      - libfreetype.so.6()(64bit)
+
+rpm:
+  summary: Dávkový konvertor videa přes FFmpeg
+  group: Productivity/Multimedia/Video/Editors and Convertors

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=FFMPEG Master
+Comment=Dávkový konvertor videa přes FFmpeg
+Comment[en]=Batch video converter using FFmpeg
+Exec=ffmpeg-master
+Icon=ffmpeg-master
+Terminal=false
+Categories=AudioVideo;Video;

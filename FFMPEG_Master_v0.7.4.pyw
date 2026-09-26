@@ -8,6 +8,7 @@ import re
 import time
 import copy
 import shlex
+import tempfile
 import webbrowser
 import urllib.request
 import urllib.error
@@ -16,8 +17,36 @@ import customtkinter as ctk
 from tkinter import messagebox, Listbox, filedialog, EXTENDED, Menu
 from tkinterdnd2 import DND_FILES, TkinterDnD
 
-VERSION = "v0.5"
+VERSION = "v0.7.4"
 GITHUB_REPO = "DaTTcz/FFMPEG-Master"
+
+
+def _restore_system_library_env():
+    """Vrátí proměnnou LD_LIBRARY_PATH do stavu před spuštěním PyInstaller binárky.
+
+    PyInstaller (onefile) při startu nastaví LD_LIBRARY_PATH na svou dočasnou složku /tmp/_MEIxxxx
+    se zabalenými knihovnami (buildí se na Ubuntu 24.04). Tuto proměnnou pak dědí KAŽDÝ spuštěný
+    systémový program - ffprobe, ffmpeg, pkexec, xdg-open (prohlížeč), update skript... Ty pak
+    místo knihoven svého systému načtou ty zabalené, starší. Na Mintu/Ubuntu 24.04 se nic nestane
+    (verze sedí), ale na rolling distribucích (openSUSE Tumbleweed/Slowroll, Fedora, Arch) systémový
+    ffprobe spadne dřív, než vůbec otevře soubor - např.
+        ffprobe: symbol lookup error: /lib64/libldap.so.2: undefined symbol: EVP_md2, version OPENSSL_3.0.0
+    (zabalený libcrypto z Ubuntu vs. systémový libldap ze Slowrollu) a appka hlásila jen
+    „Nelze analyzovat soubor (žádné video?)".
+
+    Oprava v os.environ je bezpečná i pro samotnou běžící appku: dynamický linker si LD_LIBRARY_PATH
+    přečte jen jednou při startu procesu, takže změna ovlivní výhradně nově spouštěné programy.
+    Původní hodnotu PyInstaller ukládá do LD_LIBRARY_PATH_ORIG (pokud žádná nebyla, chybí úplně)."""
+    if sys.platform == "win32" or not getattr(sys, "frozen", False):
+        return
+    orig = os.environ.pop("LD_LIBRARY_PATH_ORIG", None)
+    if orig:
+        os.environ["LD_LIBRARY_PATH"] = orig
+    else:
+        os.environ.pop("LD_LIBRARY_PATH", None)
+
+
+_restore_system_library_env()
 
 # --- OPRAVA IKONY V LIŠTĚ WINDOWS ---
 try:
@@ -28,19 +57,205 @@ except Exception:
 
 
 def resource_path(relative_path):
-    """Cesta k souborům zabaleným uvnitř exe (ikony, obrázky) - funguje v .py i ve zmrazeném PyInstaller exe."""
-    try:
-        base_path = sys._MEIPASS
-    except Exception:
-        base_path = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(base_path, relative_path)
+    """Cesta k souborům zabaleným uvnitř exe (ikony, obrázky) - funguje v .py i ve zmrazeném PyInstaller exe.
+
+    Zkusí víc kandidátních umístění (PyInstaller onefile extrakční adresář _MEIPASS, adresář vedle
+    samotné binárky, adresář vedle .pyw skriptu) a vrátí první, které skutečně existuje. Díky tomu
+    funguje i workaround "dej favicon.ico/favicon.png ručně vedle binárky", kdyby se z nějakého
+    důvodu nezabalily dovnitř (a do konzole/logu se v takovém případě napíše varování - viz volající)."""
+    candidates = []
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidates.append(os.path.join(meipass, relative_path))
+    if getattr(sys, "frozen", False):
+        candidates.append(os.path.join(os.path.dirname(sys.executable), relative_path))
+    candidates.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), relative_path))
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            return candidate
+    # Nic nenalezeno - vrať první kandidát (obvyklé chování dřív), volající si existenci stejně
+    # ověřuje přes os.path.exists a chybějící soubor jen zaloguje/přeskočí.
+    return candidates[0]
+
+
+def _linux_user_config_dir():
+    """Standardní XDG adresář pro config.json u .deb instalace (~/.config/ffmpeg-master, nebo
+    $XDG_CONFIG_HOME). Binárka u .deb instalace leží v /usr/bin - sdílená mezi všemi uživateli
+    a bez rootu nezapisovatelná - takže na rozdíl od AppImage/přenosného buildu nejde config
+    ukládat vedle samotné binárky."""
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
+    return os.path.join(base, "ffmpeg-master")
 
 
 def base_dir():
-    """Adresář vedle .exe (frozen) nebo vedle .pyw (dev) - sem patří config.json, aby šel editovat i po zabalení."""
+    """Adresář, kam patří config.json (a dočasná složka pro auto-update) - obvykle vedle .exe
+    (frozen) nebo vedle .pyw (dev). Výjimky jsou Linux AppImage a .deb instalace (viz
+    linux_run_mode() níže): u AppImage by sys.executable ukazoval do dočasného, read-only mount
+    pointu (mění se při každém spuštění), takže se použije adresář vedle samotného .AppImage
+    souboru - stejná konvence jako u přenosné .exe/.pyw (config jde vidět a upravovat vedle
+    binárky, jde i přenést spolu s ní). U .deb instalace je binárka v /usr/bin (sdílená, bez
+    rootu nezapisovatelná), takže se použije standardní XDG adresář v domovské složce uživatele."""
     if getattr(sys, 'frozen', False):
+        if sys.platform != "win32":
+            mode = linux_run_mode()
+            if mode == "appimage":
+                return os.path.dirname(os.path.abspath(os.environ["APPIMAGE"]))
+            if mode in ("deb", "rpm"):
+                return _linux_user_config_dir()
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
+
+
+def linux_run_mode():
+    """Rozpozná, jak byla aplikace na Linuxu spuštěna - ovlivňuje jak self-registraci .desktop
+    záznamu níže, tak logiku auto-update (viz start_update_download/_download_and_install):
+
+    - "appimage" - běží zabalená jako AppImage (pozná se podle proměnné prostředí APPIMAGE, kterou
+                   nastavuje samotný AppImage runtime při spuštění). sys.executable tu ukazuje do
+                   dočasného mount pointu (mění se při každém spuštění) - pro .desktop Exec= i pro
+                   auto-update je potřeba stabilní cesta k .AppImage souboru z proměnné APPIMAGE.
+    - "deb"      - nainstalováno přes .deb balíček (binárka leží v /usr/bin, kam ji dá dpkg).
+                   .desktop záznam a ikonu si přinese sám balíček (viz DEBIAN/postinst v CI) -
+                   sebe-registraci níže tedy netřeba spouštět. Auto-update se navíc chová jinak:
+                   binárka je v /usr/bin (root-owned), takže appka ji sama nepřepíše - jen upozorní
+                   a odkáže na stažení nového .deb (viz start_update_download).
+    - "rpm"      - totéž jako "deb", jen nainstalováno přes .rpm balíček (Fedora, openSUSE). Liší se
+                   jen tím, jaký soubor se stáhne a čím se nainstaluje při auto-update (rpm -U).
+    - "portable" - cokoliv jiného zmrazeného (ruční/lokální PyInstaller build spuštěný odkudkoliv) -
+                   původní chování, cesta ze sys.executable.
+    - "script"   - spuštěno jako .pyw/.py skript (vývoj), ne zmrazený build.
+    """
+    if not getattr(sys, "frozen", False):
+        return "script"
+    if os.environ.get("APPIMAGE"):
+        return "appimage"
+    exe = os.path.realpath(sys.executable)
+    if exe.startswith("/usr/") or exe.startswith("/opt/"):
+        return _linux_package_kind()
+    return "portable"
+
+
+_PACKAGE_KIND_CACHE = []
+
+
+def _linux_package_kind():
+    """Rozliší, jestli binárku v /usr nainstaloval dpkg (.deb) nebo rpm (.rpm). Podle databáze
+    balíčků, ne podle distribuce - na Debianu jde doinstalovat rpm a naopak. Výsledek se cachuje
+    (volá se opakovaně a rpm -q by jinak běžel pokaždé)."""
+    if not _PACKAGE_KIND_CACHE:
+        _PACKAGE_KIND_CACHE.append(_detect_linux_package_kind())
+    return _PACKAGE_KIND_CACHE[0]
+
+
+def _detect_linux_package_kind():
+    if os.path.exists("/var/lib/dpkg/info/ffmpeg-master.list"):
+        return "deb"
+    if shutil.which("rpm"):
+        try:
+            res = subprocess.run(["rpm", "-q", "ffmpeg-master"], capture_output=True, timeout=5)
+            if res.returncode == 0:
+                return "rpm"
+        except Exception:
+            pass
+    # Nerozpoznáno (ruční kopie do /usr/local/bin apod.) - chová se jako balíček: config v ~/.config,
+    # bez sebe-registrace do menu. Auto-update pak podle toho, jaký správce balíčků systém má.
+    return "rpm" if shutil.which("rpm") and not shutil.which("dpkg") else "deb"
+
+
+def ensure_linux_desktop_entry():
+    """Na Linuxu (jen ve zabalené binárce) zaregistruje aplikaci do standardní XDG nabídky/launcheru.
+
+    Samotné spuštění binárky o tohle nijak nepečuje - ikona nastavená přes iconphoto() v kódu výše
+    platí jen pro běžící okno (titulkový pruh, přepínač oken), ale start menu/launcher/dock potřebuje
+    samostatný .desktop soubor + ikonu na standardním místě (~/.local/share/applications,
+    ~/.local/share/icons/...). Bez rootu, jen do domovského adresáře uživatele; bezpečně se přeskočí
+    (žádná chyba), pokud cokoliv selže - jde čistě o kosmetické vylepšení, ne o nutnou podmínku běhu."""
+    mode = linux_run_mode()
+    if mode in ("deb", "rpm"):
+        # .desktop záznam a ikonu si appka přinese už v .deb balíčku (system-wide v /usr/share/...
+        # - viz DEBIAN/postinst v CI), sebe-registrace do ~/.local/share by jen vytvořila druhou,
+        # zbytečnou položku v menu. Navíc podle XDG specifikace má uživatelský záznam přednost před
+        # systémovým - pokud appka byla dřív vyzkoušená jako AppImage/přenosná verze (ta se sama
+        # zaregistrovala právě do ~/.local/share), ten starý záznam by teď kliknutí v menu potichu
+        # posílal na neexistující/starou binárku místo na nově nainstalovaný .deb. Proto se tu
+        # případný starý self-registrovaný záznam rovnou uklidí.
+        try:
+            data_home = os.environ.get("XDG_DATA_HOME") or os.path.join(os.path.expanduser("~"), ".local", "share")
+            stale_desktop = os.path.join(data_home, "applications", "ffmpeg-master.desktop")
+            stale_icon = os.path.join(data_home, "icons", "hicolor", "256x256", "apps", "ffmpeg-master.png")
+            cleaned = False
+            for stale_path in (stale_desktop, stale_icon):
+                if os.path.exists(stale_path):
+                    os.remove(stale_path)
+                    cleaned = True
+            if cleaned:
+                subprocess.run(["update-desktop-database", os.path.join(data_home, "applications")],
+                                capture_output=True, timeout=5)
+        except Exception as e:
+            print(f"[FFMPEG Master] Úklid starého .desktop záznamu selhal (nekritické): {e}", file=sys.stderr)
+        return
+    try:
+        data_home = os.environ.get("XDG_DATA_HOME") or os.path.join(os.path.expanduser("~"), ".local", "share")
+        icons_dir = os.path.join(data_home, "icons", "hicolor", "256x256", "apps")
+        apps_dir = os.path.join(data_home, "applications")
+        os.makedirs(icons_dir, exist_ok=True)
+        os.makedirs(apps_dir, exist_ok=True)
+
+        icon_dest = os.path.join(icons_dir, "ffmpeg-master.png")
+        src_icon = resource_path("favicon.png")
+        icon_value = "ffmpeg-master"
+        if os.path.exists(src_icon):
+            try:
+                if not os.path.exists(icon_dest) or os.path.getmtime(src_icon) > os.path.getmtime(icon_dest):
+                    shutil.copyfile(src_icon, icon_dest)
+            except Exception:
+                pass
+        else:
+            # Ikona se nikam nezkopírovala (nenašla se) - použij rovnou absolutní cestu k PNG vedle
+            # binárky/skriptu jako Icon=, ať launcher aspoň má šanci ji najít.
+            icon_value = src_icon
+
+        desktop_path = os.path.join(apps_dir, "ffmpeg-master.desktop")
+        if mode == "appimage":
+            # Stabilní cesta k .AppImage souboru - sys.executable by tu ukazoval do dočasného
+            # mount pointu, který se mezi spuštěními mění (viz linux_run_mode()).
+            exe_path = os.environ["APPIMAGE"]
+        elif getattr(sys, "frozen", False):
+            exe_path = sys.executable
+        else:
+            exe_path = os.path.abspath(__file__)
+        content = (
+            "[Desktop Entry]\n"
+            "Type=Application\n"
+            "Name=FFMPEG Master\n"
+            "Comment=Davkovy konvertor videa pres FFmpeg\n"
+            f"Exec=\"{exe_path}\"\n"
+            f"Icon={icon_value}\n"
+            "Terminal=false\n"
+            "Categories=AudioVideo;Video;\n"
+        )
+        needs_write = True
+        if os.path.exists(desktop_path):
+            try:
+                with open(desktop_path, "r", encoding="utf-8") as f:
+                    needs_write = f.read() != content
+            except Exception:
+                needs_write = True
+        if needs_write:
+            with open(desktop_path, "w", encoding="utf-8") as f:
+                f.write(content)
+            try:
+                os.chmod(desktop_path, 0o755)
+            except Exception:
+                pass
+            # Nepovinné - jen pokud je nástroj po ruce; některá desktopová prostředí si soubor
+            # všimnou i bez toho, jiná potřebují databázi obnovit ručně.
+            try:
+                subprocess.run(["update-desktop-database", apps_dir], capture_output=True, timeout=5)
+            except Exception:
+                pass
+    except Exception as e:
+        print(f"[FFMPEG Master] Registrace .desktop záznamu selhala (nekritické): {e}", file=sys.stderr)
 
 
 # --- CROSS-PLATFORM PŘÍPRAVA ---
@@ -65,11 +280,24 @@ except Exception:
 CONFIG_FILENAME = "config.json"
 CONFIG_PATH = os.path.join(base_dir(), CONFIG_FILENAME)
 
+# Výchozí cesty se liší podle platformy - na Windows natvrdo (jak bylo zvykem), na Linuxu se
+# spoléhá na ffmpeg/ffprobe v PATH (běžné z balíčku distribuce) a výstupní složky pod domovským adresářem.
+if sys.platform == "win32":
+    _DEFAULT_FFMPEG_PATH = r"C:\FFMPEG\bin\ffmpeg.exe"
+    _DEFAULT_FFPROBE_PATH = r"C:\FFMPEG\bin\ffprobe.exe"
+    _DEFAULT_OUTPUT_DIR = r"C:\!VIDEO\VIDEO_OUT\OUTPUT"
+    _DEFAULT_DONE_DIR = r"C:\!VIDEO\VIDEO_OUT\HOTOVO"
+else:
+    _DEFAULT_FFMPEG_PATH = "ffmpeg"
+    _DEFAULT_FFPROBE_PATH = "ffprobe"
+    _DEFAULT_OUTPUT_DIR = os.path.join(os.path.expanduser("~"), "Videos", "FFMPEG_Master", "OUTPUT")
+    _DEFAULT_DONE_DIR = os.path.join(os.path.expanduser("~"), "Videos", "FFMPEG_Master", "HOTOVO")
+
 DEFAULT_CONFIG = {
-    "ffmpeg_path": r"C:\FFMPEG\bin\ffmpeg.exe",
-    "ffprobe_path": r"C:\FFMPEG\bin\ffprobe.exe",
-    "output_dir": r"C:\!VIDEO\VIDEO_OUT\OUTPUT",
-    "done_dir": r"C:\!VIDEO\VIDEO_OUT\HOTOVO",
+    "ffmpeg_path": _DEFAULT_FFMPEG_PATH,
+    "ffprobe_path": _DEFAULT_FFPROBE_PATH,
+    "output_dir": _DEFAULT_OUTPUT_DIR,
+    "done_dir": _DEFAULT_DONE_DIR,
     "video": {
         "codec": "hevc_nvenc",
         "pix_fmt": "p010le",
@@ -100,7 +328,7 @@ DEFAULT_CONFIG = {
     ],
     "default_genre": "Animovaný",
     "theme": "dark",
-    "window_geometry": "750x850",
+    "window_geometry": "750x740",
     "auto_select_languages": ["CZE", "CES"],
     "github_repo": GITHUB_REPO,
     "check_updates_on_startup": True
@@ -145,6 +373,7 @@ def load_config():
 
 def save_config(cfg):
     try:
+        os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
         with open(CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(cfg, f, indent=2, ensure_ascii=False)
         return True
@@ -159,18 +388,35 @@ def save_config(cfg):
 PGS_CODECS = ("hdmv_pgs_subtitle", "pgssub")
 
 
+def _short_stderr(text, max_lines=4):
+    """Posledních pár neprázdných řádků chybového výstupu - do logu stačí to podstatné."""
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    return " | ".join(lines[-max_lines:])
+
+
 def probe_file(file_path, ffprobe_path):
-    """Vrátí dict s duration, video info a detailním seznamem audio/titulkových stop."""
+    """Vrátí (info, None) s duration, video info a detailním seznamem audio/titulkových stop,
+    nebo (None, "důvod") pokud soubor nejde analyzovat - důvod se vypíše do logu, ať je hned vidět,
+    jestli chybí/padá samotný ffprobe, nebo je problém v souboru."""
     cmd = [ffprobe_path, "-v", "error",
            "-analyzeduration", "20000000", "-probesize", "20000000",
            "-show_entries",
            "format=duration:stream=index,codec_type,codec_name,width,height,channels,channel_layout,bit_rate:stream_tags=language,title",
            "-of", "json", file_path]
     try:
-        res = subprocess.run(cmd, capture_output=True, text=True, creationflags=SUBPROCESS_FLAGS)
-        data = json.loads(res.stdout)
-    except Exception:
-        return None
+        res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                             creationflags=SUBPROCESS_FLAGS)
+    except FileNotFoundError:
+        return None, f"ffprobe nenalezen ({ffprobe_path}) - zkontroluj cestu v Nastavení"
+    except Exception as e:
+        return None, f"ffprobe nešel spustit ({ffprobe_path}): {e}"
+    if res.returncode != 0:
+        detail = _short_stderr(res.stderr) or "bez chybového výstupu"
+        return None, f"ffprobe skončil s kódem {res.returncode}: {detail}"
+    try:
+        data = json.loads(res.stdout or "{}")
+    except Exception as e:
+        return None, f"nečitelný výstup z ffprobe ({e}): {_short_stderr(res.stderr) or (res.stdout or '')[:200]}"
 
     duration = float(data.get("format", {}).get("duration", 0) or 0)
     video = None
@@ -199,8 +445,8 @@ def probe_file(file_path, ffprobe_path):
             })
 
     if video is None:
-        return None
-    return {"duration": duration, "video": video, "audio_streams": audio_streams, "sub_streams": sub_streams}
+        return None, "soubor neobsahuje žádnou video stopu"
+    return {"duration": duration, "video": video, "audio_streams": audio_streams, "sub_streams": sub_streams}, None
 
 
 def default_selection(streams, auto_langs, fallback_to_others):
@@ -256,7 +502,29 @@ def default_encode_args(cfg):
     return ["-c:v", str(v["codec"]), "-pix_fmt", str(v["pix_fmt"]), "-profile:v", str(v["profile"]),
             "-rc", str(v["rc"]), "-cq", str(v["cq"]), "-preset", str(v["preset"]),
             "-c:a", str(a["codec"]), "-b:a", str(a["bitrate"]),
-            "-c:s", "copy", "-max_muxing_queue_size", "1024"]
+            "-c:s", "copy", "-max_muxing_queue_size", "1000000"]
+
+
+def force_copy_video(encode_args):
+    """Nahradí (nebo doplní) '-c:v <cokoliv>' za '-c:v copy' - použije se, když má daný soubor
+    zapnuté 'Kopírovat video beze změny'. Funguje jak na výchozí, tak na vlastní encode_args.
+    Zároveň odstraní enkodérové přepínače, které jsou u 'copy' bezpředmětné (jinak ffmpeg jen
+    hlásí neškodná, ale rušivá varování o nevyužitých volbách)."""
+    args = list(encode_args)
+    # Smaž dvojice "-flag hodnota" pro přepínače relevantní jen při skutečném překódování videa.
+    for flag in ("-pix_fmt", "-profile:v", "-rc", "-cq", "-preset"):
+        while flag in args:
+            idx = args.index(flag)
+            del args[idx:idx + 2]
+    if "-c:v" in args:
+        idx = args.index("-c:v")
+        if idx + 1 < len(args):
+            args[idx + 1] = "copy"
+        else:
+            args.append("copy")
+    else:
+        args = ["-c:v", "copy"] + args
+    return args
 
 
 DRIVE_REMOTE = 4  # Windows GetDriveTypeW konstanta pro síťovou jednotku
@@ -278,56 +546,6 @@ def is_network_path(path):
 
 
 # ==========================================================================
-#  SPLASH SCREEN
-# ==========================================================================
-
-class SplashScreen(ctk.CTkToplevel):
-    def __init__(self, parent):
-        super().__init__(parent)
-        self.overrideredirect(True)
-        w, h = 450, 380
-        x = (self.winfo_screenwidth() // 2) - (w // 2)
-        y = (self.winfo_screenheight() // 2) - (h // 2)
-        self.geometry(f"{w}x{h}+{x}+{y}")
-        self.configure(fg_color="#1a1a1a")
-
-        logo_loaded = False
-        if HAS_PILLOW:
-            try:
-                img_path = resource_path("favicon.png")
-                if os.path.exists(img_path):
-                    img_raw = Image.open(img_path)
-                    logo_img = ctk.CTkImage(light_image=img_raw, dark_image=img_raw, size=(160, 160))
-                    self.logo_label = ctk.CTkLabel(self, image=logo_img, text="")
-                    self.logo_label.pack(pady=(30, 10))
-                    logo_loaded = True
-            except Exception:
-                pass
-
-        if not logo_loaded:
-            self.logo_label = ctk.CTkLabel(self, text=f"FFMPEG Master {VERSION}", font=("Arial", 32, "bold"), text_color="#1f538d")
-            self.logo_label.pack(pady=(60, 20))
-
-        ctk.CTkLabel(self, text=f"FFMPEG Master {VERSION}", font=("Arial", 16, "bold"), text_color="#28a745").pack(pady=(5, 0))
-        ctk.CTkLabel(self, text="©2026 David Trubka", font=("Arial", 10, "italic"), text_color="#2871a7").pack(pady=(0, 5))
-        self.label_status = ctk.CTkLabel(self, text="Inicializace...", font=("Arial", 11, "italic"), text_color="gray")
-        self.label_status.pack(pady=(20, 0))
-        self.prog = ctk.CTkProgressBar(self, width=350, height=4, progress_color="#1f538d")
-        self.prog.pack(pady=20)
-        self.prog.set(0)
-
-    def run_progress(self):
-        quotes = ["Inicializace kodeků...", "Detekce CUDA jader...", "Příprava FFmpeg...", "Optimalizace procesů...", "Vše je připraveno!"]
-        for i in range(1, 101):
-            self.prog.set(i / 100)
-            idx = min((i - 1) * len(quotes) // 100, len(quotes) - 1)
-            self.label_status.configure(text=quotes[idx])
-            self.update()
-            time.sleep(0.06)
-        self.destroy()
-
-
-# ==========================================================================
 #  DIALOG: VÝBĚR STOP (+ NFO metadata) PŘI PŘIDÁNÍ SOUBORU
 # ==========================================================================
 
@@ -341,6 +559,11 @@ class TrackSelectionDialog(ctk.CTkToplevel):
         self.geometry("820x640")
         self.minsize(700, 500)
         self.transient(parent)
+        # update_idletasks() před grab_set() - grab vyžaduje, aby okno bylo už "viewable"
+        # (namapované window managerem), což se nestane hned po vytvoření/geometry() ale až
+        # asynchronně. Bez tohohle grab_set() občas (podle přesného časování, viz stejný bug u
+        # AboutDialog) spadne na "grab failed: window not viewable".
+        self.update_idletasks()
         self.grab_set()
         self.resizable(True, True)
 
@@ -363,6 +586,13 @@ class TrackSelectionDialog(ctk.CTkToplevel):
         v = probe["video"]
         ctk.CTkLabel(head, text=f"Video: {v['res']} ({v['codec_name']})   •   Délka: {fmt_duration(probe['duration'])}",
                      font=("Arial", 11), text_color="gray").pack(anchor="w", pady=(2, 0))
+
+        self.copy_video_var = ctk.BooleanVar(value=(initial or {}).get("copy_video", False))
+        ctk.CTkCheckBox(head, text="🎬 Kopírovat video beze změny (bez překódování, bez zmenšení)",
+                         variable=self.copy_video_var).pack(anchor="w", pady=(6, 0))
+        ctk.CTkLabel(head, text="Video se nebude dekódovat ani zmenšovat - jen se zkopíruje. Výstup bude větší a "
+                                 "beze změny rozlišení, ale nehrozí pád na poškozených snímcích. Zvuk se normalizuje normálně.",
+                     font=("Arial", 10), text_color="gray", wraplength=760, justify="left").pack(anchor="w", pady=(1, 0))
 
         # --- Scrollovatelná oblast s tabulkou stop ---
         scroll = ctk.CTkScrollableFrame(self, label_text="Zvukové a titulkové stopy")
@@ -512,7 +742,8 @@ class TrackSelectionDialog(ctk.CTkToplevel):
             "selected_audio": sel_audio,
             "selected_subs": sel_subs,
             "nfo": nfo,
-            "generate_nfo_for_file": nfo_for_file
+            "generate_nfo_for_file": nfo_for_file,
+            "copy_video": self.copy_video_var.get()
         }
         self.grab_release()
         self.destroy()
@@ -529,6 +760,7 @@ class SettingsDialog(ctk.CTkToplevel):
         self.title("Nastavení")
         self.geometry("640x760")
         self.transient(parent)
+        self.update_idletasks()  # ať je okno "viewable", než se zavolá grab_set() (viz AboutDialog)
         self.grab_set()
         self.resizable(False, True)
         cfg = app.cfg
@@ -569,8 +801,8 @@ class SettingsDialog(ctk.CTkToplevel):
             return entry
 
         section("Cesty")
-        self.e_ffmpeg = path_row("FFmpeg.exe", cfg["ffmpeg_path"])
-        self.e_ffprobe = path_row("FFprobe.exe", cfg["ffprobe_path"])
+        self.e_ffmpeg = path_row("FFmpeg", cfg["ffmpeg_path"])
+        self.e_ffprobe = path_row("FFprobe", cfg["ffprobe_path"])
         self.e_out = path_row("Výstupní složka", cfg["output_dir"], is_dir=True)
         self.e_done = path_row("Složka HOTOVO", cfg["done_dir"], is_dir=True)
 
@@ -731,6 +963,12 @@ class AboutDialog(ctk.CTkToplevel):
         self.title("O programu")
         self.geometry("380x420")
         self.transient(parent)
+        # update_idletasks() před grab_set() - bez tohohle grab_set() u zavolání z některých míst
+        # (např. kliknutí na banner "dostupná nová verze") spadne na _tkinter.TclError: "grab
+        # failed: window not viewable", protože okno ještě nestihlo být window managerem
+        # namapované/viditelné, když grab_set() běží hned za sebou. update_idletasks() zpracuje
+        # čekající geometry/map požadavky, takže grab_set() pak už narazí na skutečně existující okno.
+        self.update_idletasks()
         self.grab_set()
         self.resizable(False, False)
 
@@ -741,8 +979,10 @@ class AboutDialog(ctk.CTkToplevel):
                     img_raw = Image.open(img_path)
                     logo_img = ctk.CTkImage(light_image=img_raw, dark_image=img_raw, size=(96, 96))
                     ctk.CTkLabel(self, image=logo_img, text="").pack(pady=(20, 8))
-            except Exception:
-                pass
+                else:
+                    print(f"[FFMPEG Master] Logo nenalezeno: {img_path}", file=sys.stderr)
+            except Exception as e:
+                print(f"[FFMPEG Master] Načtení loga selhalo: {e}", file=sys.stderr)
 
         ctk.CTkLabel(self, text=f"FFMPEG Master {VERSION}", font=("Arial", 18, "bold")).pack(pady=(0, 2))
         ctk.CTkLabel(self, text="Dávkový konvertor videa přes FFmpeg", font=("Arial", 11), text_color="gray").pack()
@@ -763,6 +1003,13 @@ class AboutDialog(ctk.CTkToplevel):
         ctk.CTkButton(self, text="Zavřít", fg_color="#555555", command=self.destroy).pack(pady=(4, 12))
 
         ctk.CTkLabel(self, text="Licence: PolyForm Noncommercial License 1.0.0", font=("Arial", 9), text_color="#3a3a3a").pack(side="bottom", pady=(0, 8))
+
+        # Pokud appka už dřív zjistila novou verzi (proto se vůbec zobrazil banner "dostupná nová
+        # verze" na hlavním okně - viz _startup_update_check), rovnou tu informaci ukaž/nabídni
+        # update - ať uživatel nemusí po kliknutí na banner ještě jednou ručně mačkat "Zkontrolovat
+        # aktualizace" a čekat na nový dotaz na GitHub, když appka tu odpověď už má.
+        if getattr(self.app, "_pending_update_info", None):
+            self.after(50, lambda: self._show_result(self.app._pending_update_info))
 
     def manual_check(self):
         self.status_label.configure(text="Kontroluji...")
@@ -824,18 +1071,50 @@ def check_for_updates(repo):
 class App(ctk.CTk, TkinterDnD.DnDWrapper):
     def __init__(self):
         super().__init__()
-        self.TkdndVersion = TkinterDnD._require(self)
+        try:
+            self.TkdndVersion = TkinterDnD._require(self)
+            self.dnd_available = True
+        except Exception:
+            # Na některých (hlavně Linux) systémech nemusí být nainstalovaný tkdnd Tcl balíček -
+            # aplikace ať v takovém případě běží dál, jen bez drag & drop (tlačítko "Přidat soubory" funguje vždy).
+            self.TkdndVersion = None
+            self.dnd_available = False
 
         self.cfg = load_config()
         ctk.set_appearance_mode(self.cfg.get("theme", "dark"))
 
         self.title(f"FFMPEG Master {VERSION}")
-        self.geometry(self.cfg.get("window_geometry", "750x850"))
+        # Velikost/pozice okna na uloženou hodnotu z configu se nastaví až v _build_main_ui() -
+        # po dobu splash animace (_show_splash() níže) má okno svou vlastní menší velikost, ať
+        # nevypadá jako prázdné plátno, a teprve po jejím doběhnutí se "roztáhne" na skutečné UI.
 
         try:
-            self.iconbitmap(resource_path("favicon.ico"))
-        except Exception:
-            pass
+            if sys.platform == "win32":
+                ico_path = resource_path("favicon.ico")
+                if os.path.exists(ico_path):
+                    self.iconbitmap(ico_path)
+                else:
+                    print(f"[FFMPEG Master] Ikona nenalezena: {ico_path}", file=sys.stderr)
+            elif HAS_PILLOW:
+                # .ico/iconbitmap je Windows-only; na Linuxu/macOS se ikona okna/lišty nastavuje přes iconphoto z PNG.
+                from PIL import ImageTk
+                png_path = resource_path("favicon.png")
+                if os.path.exists(png_path):
+                    self._app_icon_img = ImageTk.PhotoImage(Image.open(png_path))
+                    self.iconphoto(True, self._app_icon_img)
+                else:
+                    print(f"[FFMPEG Master] Ikona nenalezena: {png_path}", file=sys.stderr)
+        except Exception as e:
+            print(f"[FFMPEG Master] Nastavení ikony okna selhalo: {e}", file=sys.stderr)
+
+        # Samostatný try/except (nezávislý na nastavení ikony okna výše) - .desktop záznam se má
+        # zaregistrovat i kdyby selhalo cokoliv jiného (typicky chybějící PIL._tkinter_finder v
+        # zabaleném buildu - viz --hidden-import PIL._tkinter_finder v build.yml/BUILD.md).
+        try:
+            if sys.platform not in ("win32", "darwin"):
+                ensure_linux_desktop_entry()
+        except Exception as e:
+            print(f"[FFMPEG Master] Registrace .desktop záznamu selhala: {e}", file=sys.stderr)
 
         self.is_running = False
         self.stop_requested = False
@@ -843,6 +1122,77 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self.log_entries = []  # (text, is_debug, is_error)
         self.run_completed = False
         self.queue = []  # list of dict - viz add_file()
+
+        # Úvodní "loading" obsah přímo v tomhle (jediném) okně - žádné druhé Toplevel okno se
+        # samostatným zobrazováním/skrýváním, které se na různých linuxových WM/kompozitorech
+        # chovalo nespolehlivě (viz historie oprav výše/BUILD.md). Okno se ukáže hned normálně,
+        # animace doběhne, obsah se zahodí a nahradí skutečným UI (_build_main_ui() níže).
+        self._show_splash()
+        self._build_main_ui()
+
+    def _show_splash(self):
+        """Vykreslí úvodní logo/verzi/progress bar přímo do hlavního okna a chvíli animuje (stejný
+        obsah/animace jako dřívější samostatné SplashScreen okno) - viz komentář v __init__ výše.
+        Okno má po dobu animace menší, přesně padnoucí velikost (stejné rozměry jako dřívější
+        samostatné splash okno) místo aby se hned otevřelo v uložené velikosti hlavního UI -
+        na tu se "roztáhne" až _build_main_ui() po doběhnutí animace."""
+        w, h = 450, 380
+        x = (self.winfo_screenwidth() // 2) - (w // 2)
+        y = (self.winfo_screenheight() // 2) - (h // 2)
+        # minsize/maxsize na stejnou hodnotu jako geometry - bez toho customtkinter/WM okno umí
+        # hned po vytvoření přeplácnout na jinou (větší) velikost, i když je geometry() nastavená
+        # explicitně natvrdo hned za sebou. S tímhle je 450x380 vynucená, dokud ji _build_main_ui()
+        # po doběhnutí animace záměrně neuvolní zpět na (1, 1)/(screen) a nenastaví uloženou velikost.
+        self.minsize(w, h)
+        self.maxsize(w, h)
+        self.geometry(f"{w}x{h}+{x}+{y}")
+        self.update_idletasks()
+
+        splash_frame = ctk.CTkFrame(self, fg_color="#1a1a1a")
+        splash_frame.pack(fill="both", expand=True)
+
+        logo_loaded = False
+        if HAS_PILLOW:
+            try:
+                img_path = resource_path("favicon.png")
+                if os.path.exists(img_path):
+                    img_raw = Image.open(img_path)
+                    logo_img = ctk.CTkImage(light_image=img_raw, dark_image=img_raw, size=(160, 160))
+                    ctk.CTkLabel(splash_frame, image=logo_img, text="").pack(pady=(30, 10))
+                    logo_loaded = True
+                else:
+                    print(f"[FFMPEG Master] Logo nenalezeno: {img_path}", file=sys.stderr)
+            except Exception as e:
+                print(f"[FFMPEG Master] Načtení loga selhalo: {e}", file=sys.stderr)
+        if not logo_loaded:
+            ctk.CTkLabel(splash_frame, text=f"FFMPEG Master {VERSION}", font=("Arial", 32, "bold"), text_color="#1f538d").pack(pady=(60, 20))
+
+        ctk.CTkLabel(splash_frame, text=f"FFMPEG Master {VERSION}", font=("Arial", 16, "bold"), text_color="#28a745").pack(pady=(5, 0))
+        ctk.CTkLabel(splash_frame, text="©2026 David Trubka", font=("Arial", 10, "italic"), text_color="#2871a7").pack(pady=(0, 5))
+        label_status = ctk.CTkLabel(splash_frame, text="Inicializace...", font=("Arial", 11, "italic"), text_color="gray")
+        label_status.pack(pady=(20, 0))
+        prog = ctk.CTkProgressBar(splash_frame, width=350, height=4, progress_color="#1f538d")
+        prog.pack(pady=20)
+        prog.set(0)
+        self.update()
+
+        quotes = ["Inicializace kodeků...", "Detekce CUDA jader...", "Příprava FFmpeg...", "Optimalizace procesů...", "Vše je připraveno!"]
+        for i in range(1, 101):
+            prog.set(i / 100)
+            idx = min((i - 1) * len(quotes) // 100, len(quotes) - 1)
+            label_status.configure(text=quotes[idx])
+            self.update()
+            time.sleep(0.06)
+
+        splash_frame.destroy()
+
+    def _build_main_ui(self):
+        # Uvolni vynucenou splash velikost (viz _show_splash()) a roztáhni okno na uloženou
+        # velikost skutečného UI. Tk nemá "zruš maxsize" - nastav ho zpátky na velikost obrazovky
+        # (efektivně bez omezení), minsize (700, 500) je rozumné minimum pro hlavní okno.
+        self.maxsize(self.winfo_screenwidth(), self.winfo_screenheight())
+        self.minsize(700, 500)
+        self.geometry(self.cfg.get("window_geometry", "750x740"))
 
         self._build_menu()
 
@@ -855,10 +1205,17 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self.drop_frame = ctk.CTkFrame(self.top_frame, height=80, border_width=2, border_color="#1f538d")
         self.drop_frame.pack(side="left", fill="x", expand=True)
         self.drop_frame.pack_propagate(False)
-        self.drop_label = ctk.CTkLabel(self.drop_frame, text="Sem přetáhni video soubory (MKV, MP4, AVI...)")
-        self.drop_label.pack(expand=True)
-        self.drop_frame.drop_target_register(DND_FILES)
-        self.drop_frame.dnd_bind('<<Drop>>', self.handle_drop)
+        if self.dnd_available:
+            self.drop_label = ctk.CTkLabel(self.drop_frame, text="Sem přetáhni video soubory (MKV, MP4, AVI...)")
+            self.drop_label.pack(expand=True)
+            try:
+                self.drop_frame.drop_target_register(DND_FILES)
+                self.drop_frame.dnd_bind('<<Drop>>', self.handle_drop)
+            except Exception:
+                self.dnd_available = False
+        if not self.dnd_available:
+            self.drop_label = ctk.CTkLabel(self.drop_frame, text="Drag & drop není na tomto systému dostupný - použij „Přidat soubory“")
+            self.drop_label.pack(expand=True)
 
         self.btn_browse = ctk.CTkButton(self.top_frame, text="Přidat soubory", width=140, height=80, command=self.browse_files)
         self.btn_browse.pack(side="right", padx=(10, 0))
@@ -886,7 +1243,7 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self.debug_var.trace_add("write", lambda *_: self.redraw_log())
         ctk.CTkCheckBox(log_header, text="debug zprávy", variable=self.debug_var, font=("Arial", 11), checkbox_width=16, checkbox_height=16).pack(side="right")
 
-        self.textbox = ctk.CTkTextbox(self, height=250, font=("Consolas", 10))
+        self.textbox = ctk.CTkTextbox(self, height=140, font=("Consolas", 10))
         self.textbox.pack(padx=20, pady=(2, 10), fill="x")
         self.textbox._textbox.tag_configure("debug", foreground="#888888")
         self.textbox._textbox.tag_configure("error", foreground="#ff4444")
@@ -936,38 +1293,129 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
             self.after(0, lambda: self.update_banner.configure(
                 text=f"🔔 Dostupná nová verze {info['tag']} – klikni pro detaily (aktuální: {VERSION})"))
 
+    @staticmethod
+    def _pick_update_asset(assets):
+        """Vybere release asset odpovídající aktuální platformě/způsobu instalace. Windows build
+        z CI se jmenuje '*.exe', Linux AppImage/přenosný build '*.AppImage', Linux .deb instalace
+        '*.deb', Linux .rpm instalace '*.rpm' (viz linux_run_mode())."""
+        if sys.platform == "win32":
+            return next((a for a in assets if (a.get("name") or "").lower().endswith(".exe")), None)
+        mode = linux_run_mode()
+        if mode in ("deb", "rpm"):
+            return next((a for a in assets if (a.get("name") or "").lower().endswith("." + mode)), None)
+        return next((a for a in assets if (a.get("name") or "").lower().endswith(".appimage")), None)
+
     def start_update_download(self, info):
-        exe_asset = next((a for a in info["assets"] if (a.get("name") or "").lower().endswith(".exe")), None)
         if not getattr(sys, "frozen", False):
             # Vývojový/skriptový režim - automatická výměna souboru nedává smysl, otevři stránku s vydáním.
             self.log("Aktualizace: běžím jako .pyw skript, otevírám stránku s vydáním v prohlížeči.")
             webbrowser.open(info["html_url"])
             return
-        if not exe_asset:
-            messagebox.showwarning("Aktualizace", "V nejnovějším vydání nebyl nalezen soubor .exe. Otevírám stránku s vydáním.")
+        asset = self._pick_update_asset(info["assets"])
+        if not asset:
+            if sys.platform == "win32":
+                plat_name = "Windows (.exe)"
+            elif linux_run_mode() in ("deb", "rpm"):
+                plat_name = f"Linux (.{linux_run_mode()})"
+            else:
+                plat_name = "Linux (.AppImage)"
+            messagebox.showwarning("Aktualizace", f"V nejnovějším vydání nebyl nalezen soubor pro tuto platformu ({plat_name}). Otevírám stránku s vydáním.")
             webbrowser.open(info["html_url"])
             return
-        threading.Thread(target=self._download_and_install, args=(exe_asset,), daemon=True).start()
+        if sys.platform != "win32" and linux_run_mode() in ("deb", "rpm"):
+            # .deb/.rpm instalace: binárka je v /usr/bin (root-owned), appka ji sama nemůže přepsat bez
+            # oprávnění - stáhne nový balíček a instalaci provede přes pkexec (systémové heslové okno,
+            # stejné jako u jakéhokoliv jiného zásahu vyžadujícího root na Linuxu).
+            threading.Thread(target=self._download_and_install_package, args=(asset,), daemon=True).start()
+            return
+        threading.Thread(target=self._download_and_install, args=(asset,), daemon=True).start()
+
+    def _download_and_install_package(self, asset):
+        try:
+            update_dir = os.path.join(base_dir(), "update")
+            os.makedirs(update_dir, exist_ok=True)
+            new_path = os.path.join(update_dir, asset["name"])
+            self.log(f"Stahuji aktualizaci: {asset['name']}...")
+            urllib.request.urlretrieve(asset["url"], new_path)
+            self.log("Stažení dokončeno, instaluji (vyžádá heslo přes systémový dialog)...")
+
+            if linux_run_mode() == "rpm":
+                # rpm -U = upgrade (nebo instalace). Závislosti (ffmpeg...) už jsou splněné z první
+                # instalace, takže není potřeba jít přes dnf/zypper. Balíček není podepsaný - rpm
+                # to u lokálního souboru jen oznámí varováním, instalaci to nebrání.
+                install_cmd = ["pkexec", "rpm", "-U", "--replacepkgs", new_path]
+                manual_cmd = f'sudo rpm -U "{new_path}"'
+            else:
+                install_cmd = ["pkexec", "dpkg", "-i", new_path]
+                manual_cmd = f'sudo dpkg -i "{new_path}"'
+            result = subprocess.run(install_cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                err = (result.stderr or "").strip()
+                self.log(f"CHYBA při instalaci balíčku (kód {result.returncode}): {err}", error=True)
+                self.after(0, lambda: messagebox.showerror(
+                    "Aktualizace selhala",
+                    "Instalace nového balíčku se nezdařila"
+                    + (f":\n\n{err[:500]}" if err else " (uživatel zrušil heslové okno?).")
+                    + f"\n\nBalíček zůstal stažený zde:\n{new_path}\n\nJde ho zkusit nainstalovat ručně: {manual_cmd}"
+                ))
+                return
+
+            self.log("Aktualizace nainstalována, spouštím novou verzi...")
+            # sys.executable je u .deb/.rpm instalace stabilní cesta (/usr/bin/ffmpeg-master) - dpkg ji
+            # právě přepsal na místě, takže jde rovnou znovu spustit stejnou cestou.
+            subprocess.Popen([sys.executable], start_new_session=True)
+            self.after(0, self.destroy)
+        except FileNotFoundError:
+            ext = linux_run_mode()
+            tool = "rpm -U" if ext == "rpm" else "dpkg -i"
+            self.log("CHYBA: pkexec nenalezen (chybí balíček polkit/pkexec?).", error=True)
+            self.after(0, lambda: messagebox.showerror(
+                "Aktualizace selhala",
+                "Nástroj pro instalaci s oprávněním (pkexec) nebyl na systému nalezen.\n\n"
+                f"Stáhni si nový .{ext} ručně z GitHubu a nainstaluj ho příkazem \"sudo {tool} <soubor>.{ext}\"."))
+        except Exception as e:
+            self.log(f"CHYBA při aktualizaci: {e}", error=True)
+            self.after(0, lambda: messagebox.showerror("Aktualizace selhala", str(e)))
 
     def _download_and_install(self, asset):
         try:
             update_dir = os.path.join(base_dir(), "update")
             os.makedirs(update_dir, exist_ok=True)
-            new_exe = os.path.join(update_dir, asset["name"])
+            new_path = os.path.join(update_dir, asset["name"])
             self.log(f"Stahuji aktualizaci: {asset['name']}...")
-            urllib.request.urlretrieve(asset["url"], new_exe)
+            urllib.request.urlretrieve(asset["url"], new_path)
             self.log("Stažení dokončeno, instaluji...")
 
-            current_exe = sys.executable
-            bat_path = os.path.join(update_dir, "update.bat")
-            with open(bat_path, "w", encoding="utf-8") as f:
-                f.write(f"""@echo off
+            # Na Linuxu jako AppImage je stabilní cesta k souboru, který se má nahradit, v
+            # proměnné APPIMAGE (viz linux_run_mode) - sys.executable by ukazoval do dočasného
+            # mount pointu. Jinde (Windows .exe, přenosný Linux build) je to prostě sys.executable.
+            current_exe = os.environ["APPIMAGE"] if sys.platform != "win32" and linux_run_mode() == "appimage" else sys.executable
+            if sys.platform == "win32":
+                # Běžící .exe nejde přepsat sám sebou - pomocný .bat počká, až proces skončí, teprve pak ho nahradí a znovu spustí.
+                bat_path = os.path.join(update_dir, "update.bat")
+                with open(bat_path, "w", encoding="utf-8") as f:
+                    f.write(f"""@echo off
 timeout /t 2 /nobreak >nul
-move /y "{new_exe}" "{current_exe}"
+move /y "{new_path}" "{current_exe}"
 start "" "{current_exe}"
 del "%~f0"
 """)
-            subprocess.Popen(["cmd", "/c", bat_path], creationflags=DETACHED_FLAGS)
+                subprocess.Popen(["cmd", "/c", bat_path], creationflags=DETACHED_FLAGS)
+            else:
+                # Linuxová obdoba .bat postupu - shell skript spuštěný odděleně (start_new_session),
+                # ať přežije i po ukončení tohoto procesu.
+                os.chmod(new_path, 0o755)
+                sh_path = os.path.join(update_dir, "update.sh")
+                with open(sh_path, "w", encoding="utf-8") as f:
+                    f.write(f"""#!/bin/sh
+sleep 2
+mv -f "{new_path}" "{current_exe}"
+chmod +x "{current_exe}"
+"{current_exe}" &
+rm -f "{sh_path}"
+""")
+                os.chmod(sh_path, 0o755)
+                subprocess.Popen(["/bin/sh", sh_path], start_new_session=True)
             self.after(0, self.destroy)
         except Exception as e:
             self.log(f"CHYBA při aktualizaci: {e}", error=True)
@@ -1009,9 +1457,10 @@ del "%~f0"
 
     def add_file(self, path):
         filename = os.path.basename(path)
-        probe = probe_file(path, self.cfg["ffprobe_path"])
+        probe, probe_error = probe_file(path, self.cfg["ffprobe_path"])
         if probe is None:
-            self.log(f"[CHYBA] Nelze analyzovat soubor (žádné video?): {filename}", error=True)
+            self.log(f"[CHYBA] Nelze analyzovat soubor: {filename}", error=True)
+            self.log(f"        Důvod: {probe_error}", error=True)
             return
 
         dialog = TrackSelectionDialog(self, filename, probe, self.cfg, mode="add")
@@ -1031,6 +1480,7 @@ del "%~f0"
             "selected_subs": dialog.result["selected_subs"],
             "nfo": dialog.result["nfo"],
             "generate_nfo": dialog.result.get("generate_nfo_for_file", True),
+            "copy_video": dialog.result.get("copy_video", False),
         }
         self.queue.append(item)
         self.listbox.insert("end", filename)
@@ -1039,6 +1489,8 @@ del "%~f0"
         self.log(f"\n[ PŘIDÁNO: {filename} ]")
         self.log(f"  Video: {probe['video']['res']}, Délka: {fmt_duration(probe['duration'])}")
         self.log(f"  Vybráno: {a_n} audio stopa/y, {s_n} titulková/é stopa/y")
+        if item["copy_video"]:
+            self.log("  Video:   bez překódování (kopírováno beze změny).")
         if self.cfg.get("generate_nfo", True) and not item["generate_nfo"]:
             self.log("  NFO:     pro tento soubor vypnuto.")
         self.log("-" * 50)
@@ -1064,6 +1516,7 @@ del "%~f0"
             "selected_subs": item["selected_subs"],
             "nfo": item["nfo"],
             "generate_nfo": item.get("generate_nfo", True),
+            "copy_video": item.get("copy_video", False),
         }
 
         dialog = TrackSelectionDialog(self, item["filename"], probe, self.cfg, mode="edit", initial=initial)
@@ -1073,6 +1526,7 @@ del "%~f0"
 
         item["selected_audio"] = dialog.result["selected_audio"]
         item["selected_subs"] = dialog.result["selected_subs"]
+        item["copy_video"] = dialog.result.get("copy_video", False)
         if dialog.nfo_enabled:
             item["nfo"] = dialog.result["nfo"]
             item["generate_nfo"] = dialog.result.get("generate_nfo_for_file", True)
@@ -1080,6 +1534,8 @@ del "%~f0"
         a_n, s_n = len(item["selected_audio"]), len(item["selected_subs"])
         self.log(f"\n[ UPRAVENO: {item['filename']} ]")
         self.log(f"  Vybráno: {a_n} audio stopa/y, {s_n} titulková/é stopa/y")
+        if item["copy_video"]:
+            self.log("  Video:   bez překódování (kopírováno beze změny).")
         if self.cfg.get("generate_nfo", True) and not item.get("generate_nfo", True):
             self.log("  NFO:     pro tento soubor vypnuto.")
         self.log("-" * 50)
@@ -1087,9 +1543,17 @@ del "%~f0"
     def handle_drop(self, event):
         if self.is_running:
             return
-        paths = re.findall(r'\{(.*?)\}|(\S+)', event.data)
-        valid = [os.path.normpath(x[0] if x[0] else x[1]) for x in paths
-                 if (x[0] if x[0] else x[1]).lower().endswith(('.mkv', '.mp4', '.avi', '.mov', '.ts', '.m2ts', '.wmv', '.flv', '.webm', '.m4v'))]
+        try:
+            # self.tk.splitlist() nechá parsování na samotném Tcl interpretu (ten drop data vždy
+            # vydává jako korektní Tcl seznam, {} kolem položek s mezerou/speciálním znakem
+            # včetně). Ruční regex (fallback níže) na některých sestaveních tkdnd - typicky na
+            # Linuxu - selhával a cesty s mezerou v názvu rozsekal na dva neplatné kusy.
+            raw_paths = self.tk.splitlist(event.data)
+        except Exception:
+            matches = re.findall(r'\{(.*?)\}|(\S+)', event.data)
+            raw_paths = [m[0] if m[0] else m[1] for m in matches]
+        valid = [os.path.normpath(p) for p in raw_paths
+                 if p.lower().endswith(('.mkv', '.mp4', '.avi', '.mov', '.ts', '.m2ts', '.wmv', '.flv', '.webm', '.m4v'))]
         self._maybe_clear_log()
         for path in valid:
             self.add_file(path)
@@ -1141,73 +1605,126 @@ del "%~f0"
         self.set_ui_state(False)
         threading.Thread(target=self.run_process, daemon=True).start()
 
-    # --- LOUDNORM ANALÝZA (průchod 1/2) ---
-    def analyze_loudnorm(self, file_path, audio_mapping, duration, filename, done_count, total_files):
-        ln = self.cfg["loudnorm"]
-        self.log("  [2-průchod] Průchod 1/2: Analýza hlasitosti (loudnorm)...")
-        self.label_p1.configure(text=f"Průchod 1/2 (analýza): 0% | {filename}")
+    # --- Spuštění ffmpeg příkazu se sledováním průběhu (společné pro mix/analýzu/kódování) ---
+    @staticmethod
+    def _ffmpeg_env():
+        """Prostředí pro ffmpeg subprocess. Na Linuxu s hybridní grafikou (Intel + NVIDIA) v
+        režimu "On-Demand" (NVIDIA Prime) je NVIDIA karta bez explicitního "probuzení" pro CUDA
+        neviditelná - ffmpeg pak na hevc_nvenc/h264_nvenc padá s
+        "CUDA_ERROR_NO_DEVICE: no CUDA-capable device is detected", i když je ovladač v pořádku
+        nainstalovaný. Nastavení těchto dvou proměnných je stejný mechanismus jako `prime-run
+        <příkaz>` - řekne ovladači, ať pro tento konkrétní proces kartu použije. Neškodí to na
+        systémech bez hybridní grafiky (jedna GPU, čistě Intel/AMD apod.) - ffmpeg proměnné
+        prostě ignoruje. Na Windows se nic nemění (setdefault by tam bylo jen mrtvé proměnné)."""
+        if sys.platform == "win32":
+            return None
+        env = os.environ.copy()
+        env.setdefault("__NV_PRIME_RENDER_OFFLOAD", "1")
+        env.setdefault("__GLX_VENDOR_LIBRARY_NAME", "nvidia")
+        return env
+
+    def _run_tracked_ffmpeg(self, cmd, duration, filename, done_count, total_files,
+                             frac_base, frac_span, pass_label, log_tag="ffmpeg"):
+        """Spustí ffmpeg cmd, čte stdout, hlásí „Invalid timestamps“ souhrnně (běžné
+        u MPEG-TS zdrojů), průběžně aktualizuje progress bary/popisky podle 'time='.
+        Vrací (returncode, plný výstup jako text, počet „Invalid timestamps“ hlášek).
+        returncode je None, pokud proces nešlo spustit nebo byl přerušen uživatelem."""
+        delays = [2, 5, 10]
+        proc = None
+        for attempt in range(3):
+            try:
+                proc = subprocess.Popen(
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    universal_newlines=True, encoding="utf-8", errors="replace",
+                    creationflags=SUBPROCESS_FLAGS, env=self._ffmpeg_env()
+                )
+                break
+            except PermissionError:
+                if attempt < 2:
+                    self.log(f"  [{log_tag}] Přístup odepřen, čekám {delays[attempt]}s (pokus {attempt + 2}/3)...", debug=True)
+                    time.sleep(delays[attempt])
+                else:
+                    self.log(f"  [{log_tag}] CHYBA oprávnění — zkus spustit aplikaci jako správce.", error=True)
+                    return None, "", 0
+            except FileNotFoundError:
+                self.log(f"  [{log_tag}] CHYBA: ffmpeg nenalezen na cestě: {self.cfg['ffmpeg_path']}", error=True)
+                return None, "", 0
+
+        self.current_process = proc
+        output_lines = []
+        invalid_ts_count = 0
+        try:
+            for line in proc.stdout:
+                if self.stop_requested:
+                    proc.terminate()
+                    return None, "".join(output_lines), invalid_ts_count
+                output_lines.append(line)
+                stripped = line.rstrip()
+                if "Invalid timestamps" in line:
+                    # Běžné u MPEG-TS zdrojů (TV nahrávky apod.) - nejde o chybu, jen by zaplavilo log.
+                    invalid_ts_count += 1
+                    self.log(f"  [{log_tag}] {stripped}", debug=True)
+                elif any(kw in line for kw in ("Error", "error", "Invalid", "No such", "failed", "Cannot",
+                                                "Conversion failed", "Driver", "minimum required", "not support",
+                                                "warning", "Warning")):
+                    self.log(f"  [{log_tag}] {stripped}", error=True)
+                match = re.search(r"time=(\d+):(\d+):(\d+\.\d+)", line)
+                if match and duration > 0:
+                    h_p, m_p, s_p = map(float, match.groups())
+                    perc = min((h_p * 3600 + m_p * 60 + s_p) / duration, 1.0)
+                    file_frac = min(frac_base + perc * frac_span, 1.0)
+                    self.prog_file.set(file_frac)
+                    self.prog_total.set((done_count + file_frac) / total_files)
+                    self.label_p1.configure(text=f"{pass_label}: {int(perc * 100)}% | {filename}")
+                    self.label_p2.configure(text=f"Celkově: {int(((done_count + file_frac) / total_files) * 100)}% | Zpracovávám {done_count + 1} z {total_files}")
+                    self.update()
+        except Exception as e:
+            self.log(f"  [{log_tag}] CHYBA: {type(e).__name__}: {e}", debug=True)
+        proc.wait()
+        self.current_process = None
+        if invalid_ts_count:
+            self.log(f"  [{log_tag}] Info: ffmpeg nahlásil {invalid_ts_count}x „Invalid timestamps“ "
+                     f"(běžné u MPEG-TS zdrojů, zpravidla neškodné - zapni „debug zprávy“ pro detail).")
+        return proc.returncode, "".join(output_lines), invalid_ts_count
+
+    # --- PRŮCHOD 1/3 (za každou vybranou audio stopu): down-mix do meziformátu stereo (jen pro účely měření) ---
+    def downmix_to_stereo(self, file_path, aidx, tmp_path, duration, filename, done_count, total_files,
+                           frac_base, frac_span, pass_label):
+        self.log(f"  [mix] {pass_label}: down-mix stopy 0:{aidx} na stereo (pro přesné měření hlasitosti)...")
         cmd = [self.cfg["ffmpeg_path"],
                "-fflags", "+discardcorrupt+genpts",
                "-err_detect", "ignore_err",
                "-analyzeduration", "20000000",
                "-probesize", "20000000",
-               "-i", file_path] + audio_mapping + [
-                  "-vn",
-                  "-af", f"loudnorm=I={ln['I']}:TP={ln['TP']}:LRA={ln['LRA']}:print_format=json",
-                  "-f", "null", "-"
-              ]
-        delays = [2, 5, 10]
-        pass1_proc = None
-        for attempt in range(3):
-            try:
-                pass1_proc = subprocess.Popen(
-                    cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    universal_newlines=True, encoding="utf-8", errors="replace",
-                    creationflags=SUBPROCESS_FLAGS
-                )
-                break
-            except PermissionError:
-                if attempt < 2:
-                    self.log(f"  [2-průchod] Přístup odepřen, čekám {delays[attempt]}s (pokus {attempt + 2}/3)...", debug=True)
-                    time.sleep(delays[attempt])
-                else:
-                    raise
-            except FileNotFoundError:
-                self.log(f"  [2-průchod] CHYBA: ffmpeg nenalezen na cestě: {self.cfg['ffmpeg_path']}", error=True)
-                return None
-        try:
-            output_lines = []
-            for line in pass1_proc.stdout:
-                if self.stop_requested:
-                    pass1_proc.terminate()
-                    return None
-                output_lines.append(line)
-                if any(kw in line for kw in ("Error", "error", "Invalid", "No such", "failed", "Cannot")):
-                    self.log(f"  [ffmpeg P1] {line.strip()}", error=True)
-                match = re.search(r"time=(\d+):(\d+):(\d+\.\d+)", line)
-                if match and duration > 0:
-                    h_p, m_p, s_p = map(float, match.groups())
-                    perc = min((h_p * 3600 + m_p * 60 + s_p) / duration, 1.0)
-                    self.prog_file.set(perc * 0.5)
-                    self.prog_total.set((done_count + perc * 0.5) / total_files)
-                    self.label_p1.configure(text=f"Průchod 1/2 (analýza): {int(perc * 100)}% | {filename}")
-                    self.label_p2.configure(text=f"Celkově: {int(((done_count + perc * 0.5) / total_files) * 100)}% | Zpracovávám {done_count + 1} z {total_files}")
-                    self.update()
-            pass1_proc.wait()
-            output = "".join(output_lines)
-            json_match = re.search(r'\{[^{}]*"input_i"[^{}]*\}', output, re.DOTALL)
-            if json_match:
-                stats = json.loads(json_match.group(0))
-                self.log(f"  [2-průchod] Naměřeno: I={stats.get('input_i')} LUFS, LRA={stats.get('input_lra')} LU, TP={stats.get('input_tp')} dBTP")
-                return stats
-            self.log("  [2-průchod] VAROVÁNÍ: loudnorm statistiky nenalezeny, použiji 1-průchodový fallback.")
+               "-i", file_path,
+               "-map", f"0:{aidx}",
+               "-af", "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,"
+                      "aresample=async=1000:min_hard_comp=0.100000:first_pts=0",
+               "-c:a", "flac",
+               "-y", tmp_path]
+        rc, _, _ = self._run_tracked_ffmpeg(cmd, duration, filename, done_count, total_files,
+                                             frac_base, frac_span, pass_label, log_tag="mix")
+        return rc == 0 and os.path.exists(tmp_path) and os.path.getsize(tmp_path) > 0
+
+    # --- PRŮCHOD 2/3 (za každou vybranou audio stopu): analýza hlasitosti (loudnorm) na už zmixovaném stereu ---
+    def analyze_loudnorm(self, tmp_path, duration, filename, done_count, total_files,
+                          frac_base, frac_span, pass_label):
+        self.log(f"  [analýza] {pass_label}: analýza hlasitosti (loudnorm)...")
+        ln = self.cfg["loudnorm"]
+        cmd = [self.cfg["ffmpeg_path"], "-i", tmp_path,
+               "-af", f"loudnorm=I={ln['I']}:TP={ln['TP']}:LRA={ln['LRA']}:print_format=json",
+               "-f", "null", "-"]
+        rc, output, _ = self._run_tracked_ffmpeg(cmd, duration, filename, done_count, total_files,
+                                                  frac_base, frac_span, pass_label, log_tag="analýza")
+        if rc is None:
             return None
-        except PermissionError as e:
-            self.log(f"  [2-průchod] CHYBA oprávnění ({e}) — zkus spustit aplikaci jako správce.", debug=True)
-            return None
-        except Exception as e:
-            self.log(f"  [2-průchod] CHYBA analýzy: {type(e).__name__}: {e}", debug=True)
-            return None
+        json_match = re.search(r'\{[^{}]*"input_i"[^{}]*\}', output, re.DOTALL)
+        if json_match:
+            stats = json.loads(json_match.group(0))
+            self.log(f"  [analýza] Naměřeno: I={stats.get('input_i')} LUFS, LRA={stats.get('input_lra')} LU, TP={stats.get('input_tp')} dBTP")
+            return stats
+        self.log("  [analýza] VAROVÁNÍ: loudnorm statistiky nenalezeny, použiji 1-průchodový fallback.")
+        return None
 
     # --- NFO ---
     def create_nfo(self, item):
@@ -1250,95 +1767,130 @@ del "%~f0"
 
             self.log(f"\n>>> SPUŠTĚNO: {filename}")
 
-            first_audio_idx = a_sel[0] if a_sel else None
-            audio_only_mapping = ["-map", f"0:{first_audio_idx}"] if first_audio_idx is not None else ["-map", "0:a:0"]
-
             out_file = os.path.join(cfg["output_dir"], os.path.splitext(filename)[0] + ".mkv")
 
-            two_pass = True
             ln = cfg["loudnorm"]
             base_loudnorm = f"I={ln['I']}:TP={ln['TP']}:LRA={ln['LRA']}"
-            if two_pass:
-                stats = self.analyze_loudnorm(file_path, audio_only_mapping, duration, filename, done_count, total_files)
-                if stats and stats.get("input_i") not in (None, "-inf", "inf", "-inf "):
-                    af_audio = (
-                        f"loudnorm={base_loudnorm}:linear=true"
-                        f":measured_I={stats['input_i']}"
-                        f":measured_LRA={stats['input_lra']}"
-                        f":measured_TP={stats['input_tp']}"
-                        f":measured_thresh={stats['input_thresh']}"
-                        f":offset={stats['target_offset']}"
-                    )
-                    self.log("  [2-průchod] Průchod 2/2: Kódování s naměřenými hodnotami...")
-                else:
-                    af_audio = f"loudnorm={base_loudnorm}"
-                    self.log("  [2-průchod] Fallback: použit standardní 1-průchodový loudnorm.")
-            else:
-                af_audio = f"loudnorm={base_loudnorm}"
+            n_tracks = len(a_sel)
+            total_passes = 2 * n_tracks + 1  # (mix + analýza) za každou stopu, + finální kódování
+            pass_no = 0
+            tmp_dir = tempfile.mkdtemp(prefix="ffmpegmaster_")
+            track_af_audio = []  # af_audio (loudnorm řetězec) pro každou vybranou stopu, ve stejném pořadí jako a_sel
+            rc = None
 
-            s_map = []
-            for sidx in s_sel:
-                s_map += ["-map", f"0:{sidx}"]
-
-            vw, vh = cfg["video"]["max_width"], cfg["video"]["max_height"]
-            fc_parts = [f"[0:{v_idx}]setparams=color_trc=bt709:colorspace=bt709:color_primaries=bt709:range=tv,format=yuv420p,"
-                        f"scale={vw}:{vh}:force_original_aspect_ratio=decrease:flags=lanczos,scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p10le[vout]"]
-            fc_out_maps = ["-map", "[vout]"]
-            for i, aidx in enumerate(a_sel):
-                lbl = f"aout{i}"
-                fc_parts.append(f"[0:{aidx}]aformat=sample_fmts=fltp:sample_rates=48000,aresample=async=1:first_pts=0,{af_audio},"
-                                f"aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[{lbl}]")
-                fc_out_maps += ["-map", f"[{lbl}]"]
-
-            if cfg.get("use_custom_encode_args") and cfg.get("custom_encode_args", "").strip():
-                try:
-                    encode_args = shlex.split(cfg["custom_encode_args"], posix=(sys.platform != "win32"))
-                    if not encode_args:
-                        raise ValueError("prázdný příkaz")
-                    self.log("  [encode] Používám vlastní FFmpeg parametry z Nastavení.", debug=True)
-                except ValueError as e:
-                    self.log(f"  [encode] CHYBA ve vlastních FFmpeg parametrech ({e}), použiji výchozí nastavení.", error=True)
-                    encode_args = default_encode_args(cfg)
-            else:
-                encode_args = default_encode_args(cfg)
-
-            cmd = [cfg["ffmpeg_path"],
-                   "-fflags", "+discardcorrupt+genpts",
-                   "-err_detect", "ignore_err",
-                   "-max_error_rate", "1.0",
-                   "-analyzeduration", "20000000",
-                   "-probesize", "20000000",
-                   "-i", file_path,
-                   "-filter_complex", ";".join(fc_parts),
-                   ] + fc_out_maps + s_map + encode_args + [out_file, "-y"]
-
-            self.log(f"  [CMD] {' '.join(cmd)}", debug=True)
             try:
-                self.current_process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True, encoding='utf-8', errors='replace', creationflags=SUBPROCESS_FLAGS)
-            except FileNotFoundError:
-                self.log(f"CHYBA: ffmpeg nenalezen na cestě: {cfg['ffmpeg_path']}. Uprav Nastavení.", error=True)
+                # --- Průchody 1-2 pro každou vybranou audio stopu: down-mix na stereo do dočasného souboru,
+                #     jen proto, abychom na něm mohli přesně změřit hlasitost (stejný signál, jaký nakonec uslyší
+                #     posluchač po down-mixu). Samotné finální audio se ale kóduje přímo z originálu (viz níže) -
+                #     kdybychom zvuk brali z odděleného souboru, ztratily by se jeho původní časové značky a mohl
+                #     by se rozjet vůči videu (u zdrojů s nespojitými timestampy, typicky TV .ts nahrávky).
+                for i, aidx in enumerate(a_sel):
+                    tmp_path = os.path.join(tmp_dir, f"track{i}.flac")
+
+                    pass_no += 1
+                    label_mix = f"Průchod {pass_no}/{total_passes} (mix stopy {i + 1}/{n_tracks} → stereo)"
+                    ok = self.downmix_to_stereo(file_path, aidx, tmp_path, duration, filename, done_count, total_files,
+                                                 (pass_no - 1) / total_passes, 1 / total_passes, label_mix)
+
+                    pass_no += 1
+                    stats = None
+                    if ok:
+                        label_measure = f"Průchod {pass_no}/{total_passes} (analýza hlasitosti stopy {i + 1}/{n_tracks})"
+                        stats = self.analyze_loudnorm(tmp_path, duration, filename, done_count, total_files,
+                                                       (pass_no - 1) / total_passes, 1 / total_passes, label_measure)
+                    else:
+                        self.log(f"  [mix] VAROVÁNÍ: down-mix stopy 0:{aidx} na stereo selhal, "
+                                  f"pro tuto stopu se použije 1-průchodový loudnorm.", error=True)
+
+                    if stats and stats.get("input_i") not in (None, "-inf", "inf", "-inf "):
+                        af_audio = (
+                            f"loudnorm={base_loudnorm}:linear=true"
+                            f":measured_I={stats['input_i']}"
+                            f":measured_LRA={stats['input_lra']}"
+                            f":measured_TP={stats['input_tp']}"
+                            f":measured_thresh={stats['input_thresh']}"
+                            f":offset={stats['target_offset']}"
+                        )
+                    else:
+                        af_audio = f"loudnorm={base_loudnorm}"
+                        if ok:
+                            self.log("  [analýza] Fallback: použit standardní 1-průchodový loudnorm.")
+
+                    track_af_audio.append(af_audio)
+
+                # --- Průchod 3/3: finální kódování - video i audio se berou přímo z originálu (kvůli synchronizaci),
+                #     audio se jen normalizuje podle hodnot naměřených výše. ---
+                pass_no += 1
+                s_map = []
+                for sidx in s_sel:
+                    s_map += ["-map", f"0:{sidx}"]
+
+                copy_video = item.get("copy_video", False)
+                fc_parts = []
+                fc_out_maps = []
+                direct_maps = []
+
+                if copy_video:
+                    # Video se nedekóduje ani nefiltruje, jen se přímo namapuje a níže vynutí '-c:v copy'.
+                    direct_maps += ["-map", f"0:{v_idx}"]
+                    self.log("  [video] Kopírování beze změny (bez dekódování/zmenšení).", debug=True)
+                else:
+                    vw, vh = cfg["video"]["max_width"], cfg["video"]["max_height"]
+                    fc_parts.append(f"[0:{v_idx}]setparams=color_trc=bt709:colorspace=bt709:color_primaries=bt709:range=tv,format=yuv420p,"
+                                     f"scale={vw}:{vh}:force_original_aspect_ratio=decrease:flags=lanczos,scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p10le[vout]")
+                    fc_out_maps += ["-map", "[vout]"]
+
+                for i, aidx in enumerate(a_sel):
+                    lbl = f"aout{i}"
+                    af_audio = track_af_audio[i]
+                    fc_parts.append(f"[0:{aidx}]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,"
+                                     f"aresample=async=1000:min_hard_comp=0.100000,{af_audio},"
+                                     f"aformat=sample_fmts=fltp:sample_rates=48000[{lbl}]")
+                    fc_out_maps += ["-map", f"[{lbl}]"]
+
+                if cfg.get("use_custom_encode_args") and cfg.get("custom_encode_args", "").strip():
+                    try:
+                        encode_args = shlex.split(cfg["custom_encode_args"], posix=(sys.platform != "win32"))
+                        if not encode_args:
+                            raise ValueError("prázdný příkaz")
+                        self.log("  [encode] Používám vlastní FFmpeg parametry z Nastavení.", debug=True)
+                    except ValueError as e:
+                        self.log(f"  [encode] CHYBA ve vlastních FFmpeg parametrech ({e}), použiji výchozí nastavení.", error=True)
+                        encode_args = default_encode_args(cfg)
+                else:
+                    encode_args = default_encode_args(cfg)
+
+                if copy_video:
+                    encode_args = force_copy_video(encode_args)
+
+                filter_args = ["-filter_complex", ";".join(fc_parts)] if fc_parts else []
+
+                cmd = [cfg["ffmpeg_path"],
+                       "-fflags", "+discardcorrupt+genpts",
+                       "-err_detect", "ignore_err",
+                       "-max_error_rate", "1.0",
+                       "-analyzeduration", "20000000",
+                       "-probesize", "20000000",
+                       "-i", file_path,
+                       ] + filter_args + direct_maps + fc_out_maps + s_map + encode_args + \
+                      ["-max_interleave_delta", "0", out_file, "-y"]
+
+                self.log(f"  [CMD] {' '.join(cmd)}", debug=True)
+                label_encode = f"Průchod {pass_no}/{total_passes} (kódování)"
+                self.log(f"  [kódování] {label_encode}...")
+                rc, _, _ = self._run_tracked_ffmpeg(cmd, duration, filename, done_count, total_files,
+                                                     (pass_no - 1) / total_passes, 1 / total_passes, label_encode,
+                                                     log_tag="ffmpeg")
+            finally:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+
+            if rc is None and not self.stop_requested:
+                # ffmpeg se nepodařilo spustit (viz chybová hláška výše) - dál nemá smysl pokračovat.
                 break
 
-            for line in self.current_process.stdout:
-                line = line.rstrip()
-                if any(kw in line for kw in ("Error", "error", "Invalid", "No such", "failed", "Cannot", "Conversion failed", "Driver", "minimum required", "not support", "warning", "Warning")):
-                    self.log(f"  [ffmpeg] {line}", error=True)
-                match = re.search(r"time=(\d+):(\d+):(\d+\.\d+)", line)
-                if match and duration > 0:
-                    h_p, m_p, s_p = map(float, match.groups())
-                    perc = min((h_p * 3600 + m_p * 60 + s_p) / duration, 1.0)
-                    file_prog = (0.5 + perc * 0.5) if two_pass else perc
-                    self.prog_file.set(file_prog)
-                    self.prog_total.set((done_count + file_prog) / total_files)
-                    pass_label = " [2/2]" if two_pass else ""
-                    self.label_p1.configure(text=f"Průchod{pass_label}: {int(perc * 100)}% | {filename}")
-                    self.label_p2.configure(text=f"Celkově: {int(((done_count + file_prog) / total_files) * 100)}% | Zpracovávám {done_count + 1} z {total_files}")
-                    self.update()
+            self.log(f"  [returncode] {rc}", debug=True)
 
-            self.current_process.wait()
-            self.log(f"  [returncode] {self.current_process.returncode}", debug=True)
-
-            if self.current_process.returncode == 0 and not self.stop_requested:
+            if rc == 0 and not self.stop_requested:
                 nfo_file = self.create_nfo(item)
                 if nfo_file:
                     self.log(f"  NFO:     Soubor {nfo_file} byl úspěšně vygenerován.")
@@ -1367,8 +1919,6 @@ del "%~f0"
                 del self.queue[0]
                 done_count += 1
             else:
-                if self.stop_requested:
-                    self.log(">>> PŘERUŠENO UŽIVATELEM.")
                 self.current_process = None
                 time.sleep(0.5)
                 if os.path.exists(out_file):
@@ -1376,7 +1926,15 @@ del "%~f0"
                         os.remove(out_file)
                     except Exception:
                         pass
-                break
+                if self.stop_requested:
+                    self.log(">>> PŘERUŠENO UŽIVATELEM.")
+                    break
+                else:
+                    self.log(f"!!! CHYBA: Kódování souboru {filename} selhalo (returncode {rc}). "
+                              f"Zdrojový soubor zůstává beze změny, přeskakuji na další v pořadí.", error=True)
+                    self.listbox.delete(0)
+                    del self.queue[0]
+                    done_count += 1
 
         self.after(0, self.reset_ui)
 
@@ -1410,11 +1968,95 @@ del "%~f0"
         self.destroy()
 
 
+def run_selftest(args):
+    """Kontrola bez GUI pro CI (a pro ruční diagnostiku): `ffmpeg-master --selftest [video]`.
+
+    Ověří, že binárka na dané distribuci vůbec naběhne (Python + zabalený Tk), že spuštěné
+    systémové programy nedědí zabalené knihovny (LD_LIBRARY_PATH) a že ffmpeg/ffprobe z configu
+    (nebo výchozí z PATH) jde spustit. Volitelně rovnou zanalyzuje zadané video stejnou cestou
+    jako přidání do fronty. Nic nezapisuje (config.json nevytváří). Návratový kód 0 = vše OK."""
+    import tkinter
+    ok = True
+
+    def report(label, passed, detail=""):
+        nonlocal ok
+        ok = ok and passed
+        print(f"[{'OK' if passed else 'CHYBA'}] {label}" + (f": {detail}" if detail else ""))
+
+    print(f"FFMPEG Master {VERSION} - selftest")
+    run_mode = linux_run_mode() if sys.platform != "win32" else "windows"
+    print(f"  platforma: {sys.platform}, režim: {run_mode}, Python {sys.version.split()[0]}, Tk {tkinter.TkVersion}")
+    print(f"  config: {CONFIG_PATH}{'' if os.path.exists(CONFIG_PATH) else ' (neexistuje, použijí se výchozí hodnoty)'}")
+
+    ld_path = os.environ.get("LD_LIBRARY_PATH", "")
+    meipass = getattr(sys, "_MEIPASS", None)
+    leaked = bool(meipass) and meipass in ld_path
+    report("prostředí pro systémové programy", not leaked,
+           f"LD_LIBRARY_PATH stále obsahuje {meipass}" if leaked else "bez zabalených knihoven")
+
+    cfg = copy.deepcopy(DEFAULT_CONFIG)
+    if os.path.exists(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                cfg.update(json.load(f))
+        except Exception as e:
+            report("čtení config.json", False, str(e))
+
+    for key in ("ffmpeg_path", "ffprobe_path"):
+        exe = cfg.get(key) or ""
+        try:
+            res = subprocess.run([exe, "-hide_banner", "-version"], capture_output=True, text=True,
+                                 encoding="utf-8", errors="replace", timeout=30, creationflags=SUBPROCESS_FLAGS)
+            first = (res.stdout or "").splitlines()[0] if res.stdout else ""
+            report(f"{key} ({exe})", res.returncode == 0,
+                   first if res.returncode == 0 else f"kód {res.returncode}: {_short_stderr(res.stderr)}")
+        except FileNotFoundError:
+            report(f"{key} ({exe})", False, "nenalezen")
+        except Exception as e:
+            report(f"{key} ({exe})", False, str(e))
+
+    try:
+        res = subprocess.run([cfg.get("ffmpeg_path") or "ffmpeg", "-hide_banner", "-encoders"], capture_output=True,
+                             text=True, encoding="utf-8", errors="replace", timeout=30, creationflags=SUBPROCESS_FLAGS)
+        nvenc = sorted(set(re.findall(r"\b(\w+_nvenc)\b", res.stdout or "")))
+        print(f"  NVENC enkodéry v ffmpeg: {', '.join(nvenc) if nvenc else 'žádné (jen informativní)'}")
+    except Exception:
+        pass
+
+    if sys.platform == "win32" or os.environ.get("DISPLAY"):
+        # Skutečné načtení GUI knihoven: Tk + tkdnd (drag&drop) + písma přes systémový fontconfig.
+        # Tady se projeví konflikt zabalených a systémových knihoven písem (viz spec soubor).
+        try:
+            import tkinter.font as tkfont
+            root = TkinterDnD.Tk()
+            root.withdraw()
+            font = tkfont.Font(root=root, family="Arial", size=11)
+            width = font.measure("FFMPEG Master")
+            family = font.actual("family")
+            root.destroy()
+            report("GUI knihovny (Tk, drag&drop, písma)", width > 0, f"písmo '{family}'")
+        except Exception as e:
+            report("GUI knihovny (Tk, drag&drop, písma)", False, str(e))
+    else:
+        print("  GUI test přeskočen (není nastavený DISPLAY)")
+
+    for video_path in args:
+        info, err = probe_file(video_path, cfg.get("ffprobe_path") or "ffprobe")
+        if info:
+            report(f"analýza {os.path.basename(video_path)}", True,
+                   f"{info['video']['codec_name']} {info['video']['res']}, {fmt_duration(info['duration'])}, "
+                   f"audio {len(info['audio_streams'])}, titulky {len(info['sub_streams'])}")
+        else:
+            report(f"analýza {os.path.basename(video_path)}", False, err)
+
+    print("VÝSLEDEK: " + ("OK" if ok else "CHYBA"))
+    return 0 if ok else 1
+
+
 if __name__ == "__main__":
+    if "--selftest" in sys.argv[1:]:
+        sys.exit(run_selftest([a for a in sys.argv[1:] if a != "--selftest"]))
+    # Splash animace i skutečné UI se sestaví uvnitř App.__init__ (viz _show_splash()/
+    # _build_main_ui() výše) - jde pořád o to samé okno, nic se tu už neschovává/neodkrývá.
     app = App()
-    app.attributes('-alpha', 0.0)
-    splash = SplashScreen(app)
-    splash.run_progress()
-    app.attributes('-alpha', 1.0)
-    app.deiconify()
     app.mainloop()
