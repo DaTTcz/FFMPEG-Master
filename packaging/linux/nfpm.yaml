@@ -38,14 +38,15 @@ scripts:
   postinstall: packaging/linux/postinst.sh
   postremove: packaging/linux/postinst.sh
 
-# Závislosti: systémový ffmpeg (appka ho jen spouští) a knihovny písem, které se záměrně
-# nepřibalují (viz EXCLUDE_LIBS v ffmpeg-master.spec).
+# Závislosti: systémový ffmpeg (appka ho jen spouští), knihovny písem, které se záměrně
+# nepřibalují (viz EXCLUDE_LIBS v ffmpeg-master.spec), a kořenové certifikáty pro HTTPS.
 overrides:
   deb:
     depends:
       - ffmpeg
       - libfontconfig1
       - libfreetype6
+      - ca-certificates
     recommends:
       - pkexec | policykit-1
   rpm:
@@ -56,6 +57,9 @@ overrides:
       - /usr/bin/ffprobe
       - libfontconfig.so.1()(64bit)
       - libfreetype.so.6()(64bit)
+      # Kořenové certifikáty pro HTTPS (kontrola a stažení aktualizací z GitHubu). Minimální
+      # instalace je nemusí mít - zabalený Python pak ověření certifikátu GitHubu neprojde.
+      - ca-certificates
 
 rpm:
   summary: Dávkový konvertor videa přes FFmpeg
