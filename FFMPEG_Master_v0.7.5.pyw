@@ -1452,6 +1452,10 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self.textbox._textbox.tag_configure("error", foreground="#ff4444")
 
         self.label_p1 = ctk.CTkLabel(self, text="Aktuální soubor: ", font=("Arial", 11, "bold")); self.label_p1.pack(padx=20, anchor="w")
+        # Druhý řádek pod názvem souboru: průchod, %, rychlost kódování, uplynulý/zbývající čas.
+        # height=16 (místo výchozích 28) - ať se okno kvůli novému řádku skoro nezvětší.
+        self.label_pass = ctk.CTkLabel(self, text="", font=("Arial", 11), height=16, text_color=("gray30", "gray70"))
+        self.label_pass.pack(padx=20, pady=(0, 3), anchor="w")
         self.prog_file = ctk.CTkProgressBar(self, height=12, progress_color="#1f538d"); self.prog_file.pack(pady=(0, 10), padx=20, fill="x"); self.prog_file.set(0)
         self.label_p2 = ctk.CTkLabel(self, text="Celkový postup: 0/0", font=("Arial", 11, "bold")); self.label_p2.pack(padx=20, anchor="w")
         self.prog_total = ctk.CTkProgressBar(self, height=12, progress_color="#28a745"); self.prog_total.pack(pady=(0, 10), padx=20, fill="x"); self.prog_total.set(0)
@@ -1812,6 +1816,7 @@ rm -f "{sh_path}"
         self.btn_start.configure(state="disabled")
         self.btn_stop.configure(state="normal")
         self.set_ui_state(False)
+        self._run_started = time.monotonic()
         threading.Thread(target=self.run_process, daemon=True).start()
 
     # --- Spuštění ffmpeg příkazu se sledováním průběhu (společné pro mix/analýzu/kódování) ---
@@ -1867,6 +1872,7 @@ rm -f "{sh_path}"
         self.current_process = proc
         output_lines = []
         invalid_ts_count = 0
+        pass_started = time.monotonic()
         try:
             for line in proc.stdout:
                 if self.stop_requested:
@@ -1893,8 +1899,13 @@ rm -f "{sh_path}"
                     file_frac = min(frac_base + perc * frac_span, 1.0)
                     self.prog_file.set(file_frac)
                     self.prog_total.set((done_count + file_frac) / total_files)
-                    self.label_p1.configure(text=f"{pass_label}: {int(perc * 100)}% | {filename}")
-                    self.label_p2.configure(text=f"Celkově: {int(((done_count + file_frac) / total_files) * 100)}% | Zpracovávám {done_count + 1} z {total_files}")
+                    stats = self._progress_stats(line, perc, duration, time.monotonic() - pass_started)
+                    self.label_p1.configure(text=f"Aktuální soubor: {filename}")
+                    self.label_pass.configure(text=f"{pass_label}: {int(perc * 100)}%{stats}")
+                    total_elapsed = time.monotonic() - getattr(self, "_run_started", pass_started)
+                    self.label_p2.configure(text=f"Celkově: {int(((done_count + file_frac) / total_files) * 100)}% | "
+                                                 f"Zpracovávám {done_count + 1} z {total_files} | "
+                                                 f"celkem běží {fmt_duration(total_elapsed)}")
                     self.update()
         except Exception as e:
             self.log(f"  [{log_tag}] CHYBA: {type(e).__name__}: {e}", debug=True)
@@ -1904,6 +1915,40 @@ rm -f "{sh_path}"
             self.log(f"  [{log_tag}] Info: ffmpeg nahlásil {invalid_ts_count}x „Invalid timestamps“ "
                      f"(běžné u MPEG-TS zdrojů, zpravidla neškodné - zapni „debug zprávy“ pro detail).")
         return proc.returncode, "".join(output_lines), invalid_ts_count
+
+    @staticmethod
+    def _progress_stats(line, perc, duration, elapsed):
+        """Z řádku průběhu ffmpeg ("frame= 1234 fps=172 ... time=... speed=6.9x") sestaví doplněk
+        popisku: rychlost kódování (snímky/s - jen u videa), násobek reálného času, uplynulý a
+        odhad zbývajícího času aktuálního průchodu. Zbývající čas se počítá z "speed" (stabilnější),
+        jinak z poměru uplynulého času a hotové části."""
+        parts = []
+        fps_m = re.search(r"fps=\s*([\d.]+)", line)
+        if fps_m:
+            try:
+                fps = float(fps_m.group(1))
+                if fps > 0:
+                    parts.append(f"{fps:.0f} sn/s")
+            except ValueError:
+                pass
+        speed = None
+        speed_m = re.search(r"speed=\s*([\d.]+)x", line)
+        if speed_m:
+            try:
+                speed = float(speed_m.group(1))
+                if speed > 0:
+                    parts.append(f"{speed:.1f}×")
+            except ValueError:
+                speed = None
+        parts.append(f"uplynulo {fmt_duration(elapsed)}")
+        remaining = None
+        if speed and speed > 0 and duration > 0:
+            remaining = max(duration * (1 - perc), 0) / speed
+        elif perc > 0.01:
+            remaining = elapsed * (1 - perc) / perc
+        if remaining is not None and perc < 1.0:
+            parts.append(f"zbývá {fmt_duration(remaining)}")
+        return " · " + " · ".join(parts)
 
     # --- PRŮCHOD 1/3 (za každou vybranou audio stopu): down-mix do meziformátu stereo (jen pro účely měření) ---
     def downmix_to_stereo(self, file_path, aidx, tmp_path, duration, filename, done_count, total_files,
@@ -2166,6 +2211,7 @@ rm -f "{sh_path}"
         self.prog_file.set(0)
         self.prog_total.set(0)
         self.label_p1.configure(text="Aktuální soubor: ")
+        self.label_pass.configure(text="")
         self.label_p2.configure(text="Celkový postup: 0/0")
         if not self.stop_requested:
             self.log("\n--- VŠE DOKONČENO ---")
