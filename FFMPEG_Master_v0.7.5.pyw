@@ -50,6 +50,39 @@ def _restore_system_library_env():
 
 _restore_system_library_env()
 
+
+def _configure_ssl_certs():
+    """Nastaví systémové CA certifikáty pro HTTPS (kontrola a stažení aktualizací z GitHubu).
+
+    Zabalený Python + OpenSSL pochází z Ubuntu a certifikáty hledá tam, kde je má Debian/Ubuntu
+    (/usr/lib/ssl -> /etc/ssl/certs/ca-certificates.crt). openSUSE je má v /etc/ssl/ca-bundle.pem,
+    Fedora v /etc/pki/tls/certs/ca-bundle.crt - tam by ověření certifikátu GitHubu selhalo a appka
+    by hlásila "chybí připojení k internetu?". Proměnnou SSL_CERT_FILE čte OpenSSL při vytváření
+    každého SSL kontextu, takže stačí nastavit jednou při startu (a jen pokud ji uživatel nemá)."""
+    if sys.platform == "win32" or not getattr(sys, "frozen", False) or os.environ.get("SSL_CERT_FILE"):
+        return
+    try:
+        import ssl
+        default = ssl.get_default_verify_paths()
+        if default.cafile and os.path.exists(default.cafile):
+            return
+    except Exception:
+        pass
+    for candidate in ("/etc/ssl/certs/ca-certificates.crt",               # Debian, Ubuntu, Mint, Arch
+                      "/etc/pki/tls/certs/ca-bundle.crt",                 # Fedora, RHEL
+                      "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
+                      "/etc/ssl/ca-bundle.pem",                           # openSUSE
+                      "/var/lib/ca-certificates/ca-bundle.pem",           # openSUSE
+                      "/etc/ssl/cert.pem"):                               # Arch, Alpine
+        if os.path.exists(candidate):
+            os.environ["SSL_CERT_FILE"] = candidate
+            break
+    if not os.environ.get("SSL_CERT_DIR") and os.path.isdir("/etc/ssl/certs"):
+        os.environ["SSL_CERT_DIR"] = "/etc/ssl/certs"
+
+
+_configure_ssl_certs()
+
 # --- OPRAVA IKONY V LIŠTĚ WINDOWS ---
 try:
     myappid = f'moje.ffmpeg.master.{VERSION}'
@@ -1805,6 +1838,11 @@ rm -f "{sh_path}"
         u MPEG-TS zdrojů), průběžně aktualizuje progress bary/popisky podle 'time='.
         Vrací (returncode, plný výstup jako text, počet „Invalid timestamps“ hlášek).
         returncode je None, pokud proces nešlo spustit nebo byl přerušen uživatelem."""
+        # -hide_banner: bez úvodního banneru (verze, "configuration: ...", verze knihoven). Banner
+        # je k ničemu a řádek configuration navíc u některých buildů (Packman: "-Werror=...")
+        # obsahuje slovo "error" - v logu se pak ukazoval jako chyba i s vypnutými debug zprávami.
+        if "-hide_banner" not in cmd:
+            cmd = [cmd[0], "-hide_banner"] + list(cmd[1:])
         delays = [2, 5, 10]
         proc = None
         for attempt in range(3):
@@ -1836,7 +1874,11 @@ rm -f "{sh_path}"
                     return None, "".join(output_lines), invalid_ts_count
                 output_lines.append(line)
                 stripped = line.rstrip()
-                if "Invalid timestamps" in line:
+                is_banner = stripped.lstrip().startswith(("configuration:", "built with", "ffmpeg version",
+                                                          "libav", "libsw", "libpostproc"))
+                if is_banner:
+                    self.log(f"  [{log_tag}] {stripped}", debug=True)
+                elif "Invalid timestamps" in line:
                     # Běžné u MPEG-TS zdrojů (TV nahrávky apod.) - nejde o chybu, jen by zaplavilo log.
                     invalid_ts_count += 1
                     self.log(f"  [{log_tag}] {stripped}", debug=True)
@@ -2215,6 +2257,24 @@ def run_selftest(args):
             report("GUI knihovny (Tk, drag&drop, písma)", False, str(e))
     else:
         print("  GUI test přeskočen (není nastavený DISPLAY)")
+
+    # HTTPS na GitHub (kontrola aktualizací) - ověří, že se najdou systémové CA certifikáty.
+    # Chyba certifikátu = CHYBA; nedostupná síť jen informativně (selftest jde spustit i offline).
+    try:
+        import ssl
+        req = urllib.request.Request(f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest",
+                                     headers={"User-Agent": "FFMPEG-Master-Selftest"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            report("HTTPS (kontrola aktualizací)", True,
+                   f"GitHub odpověděl {resp.status}, certifikáty: {os.environ.get('SSL_CERT_FILE') or ssl.get_default_verify_paths().cafile}")
+    except urllib.error.HTTPError as e:
+        report("HTTPS (kontrola aktualizací)", True, f"spojení i certifikát OK (GitHub vrátil HTTP {e.code})")
+    except Exception as e:
+        reason = getattr(e, "reason", e)
+        if "CERTIFICATE" in str(reason).upper() or "SSL" in type(reason).__name__.upper():
+            report("HTTPS (kontrola aktualizací)", False, f"chyba certifikátu: {reason}")
+        else:
+            print(f"  HTTPS test přeskočen (síť nedostupná: {reason})")
 
     for video_path in args:
         info, err = probe_file(video_path, cfg.get("ffprobe_path") or "ffprobe")
