@@ -35,3 +35,6 @@ Thumbs.db
 
 # Logy
 *.log
+
+# Soubory připravené Claudem k ručnímu přenesení (např. do .github/workflows)
+Claude_OUT/

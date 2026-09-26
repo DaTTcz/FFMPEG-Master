@@ -15,11 +15,11 @@ PyInstaller build zůstává pro lokální testování.
   v buildu; hotové soubory jsou ke stažení jako artefakty daného běhu.
 - **push tagu `v*`** (např. `v0.7.4`) → plný build, test na distribucích a GitHub Release:
   1. Windows `.exe` (na `windows-latest`),
-  2. Linux PyInstaller binárka (na `ubuntu-latest`) a z ní:
+  2. Linux PyInstaller binárka (na `ubuntu-24.04`, viz „Minimální verze distribuce") a z ní:
      - univerzální `FFMPEG_Master-x86_64.AppImage`,
      - `FFMPEG_Master_<verze>_amd64.deb` (Debian/Ubuntu/Mint),
      - `FFMPEG_Master-<verze>.x86_64.rpm` (Fedora/openSUSE),
-  3. test všech linuxových balíčků v kontejnerech Ubuntu 24.04, Debian 13, Fedora, openSUSE
+  3. test všech linuxových balíčků v kontejnerech Ubuntu 24.04 a 26.04, Debian 13, Fedora, openSUSE
      Tumbleweed a Arch (viz níže),
   4. GitHub Release se všemi čtyřmi soubory — **jen pokud všechny testy prošly**.
 
@@ -84,7 +84,9 @@ připnutá v `build.yml`), který přibalí statický runtime. Hotová AppImage 
 
 ### Minimální verze distribuce
 
-Binárka je slinkovaná proti glibc z `ubuntu-latest` (24.04 → glibc 2.39), takže běží na Ubuntu
+Binárka je slinkovaná proti glibc build stroje, proto je `build-linux` záměrně připnutý na
+`ubuntu-24.04` (glibc 2.39), ne na `ubuntu-latest` (ten se od října 2026 přepíná na 26.04 a build
+z něj by na starších systémech nenaběhl). Běží tak na Ubuntu
 24.04+, Mintu 22+, Debianu 13+, aktuální Fedoře, openSUSE Tumbleweed/Slowroll a Archu. Starší
 distribuce (Ubuntu 22.04, Debian 12) se záměrně nepodporují. Kdyby to bylo potřeba, řešení je
 stavět uvnitř staršího kontejneru (např. `ubuntu:22.04`) — glibc je zpětně kompatibilní.

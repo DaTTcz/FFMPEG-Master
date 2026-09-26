@@ -38,7 +38,7 @@ Na [stránce vydání](https://github.com/DaTTcz/FFMPEG-Master/releases/latest) 
 | **`FFMPEG_Master-<verze>.x86_64.rpm`** | Fedora, openSUSE — `sudo dnf install ./FFMPEG_Master-*.rpm`, resp. `sudo zypper install --allow-unsigned-rpm ./FFMPEG_Master-*.rpm` |
 | **`FFMPEG_Master-x86_64.AppImage`** | jakákoliv jiná distribuce (Arch…) nebo bez instalace — stačí `chmod +x` a spustit |
 
-Linuxové verze potřebují distribuci s glibc 2.39 nebo novější (Ubuntu 24.04+, Mint 22+, Debian 13+, aktuální Fedora, openSUSE Tumbleweed/Slowroll, Arch). Každé vydání se před zveřejněním automaticky testuje na Ubuntu 24.04, Debianu 13, Fedoře, openSUSE Tumbleweed a Archu.
+Linuxové verze potřebují distribuci s glibc 2.39 nebo novější (Ubuntu 24.04+, Mint 22+, Debian 13+, aktuální Fedora, openSUSE Tumbleweed/Slowroll, Arch). Každé vydání se před zveřejněním automaticky testuje na Ubuntu 24.04 a 26.04, Debianu 13, Fedoře, openSUSE Tumbleweed a Archu.
 
 **Fedora / openSUSE:** oficiální `ffmpeg` z repozitářů distribuce kvůli patentům neumí H.264/HEVC ani NVENC. Pro plnou funkčnost přepni ffmpeg na verzi z [RPM Fusion](https://rpmfusion.org/) (Fedora), resp. z Packmanu (openSUSE: `sudo zypper install opi && opi codecs`).
 
