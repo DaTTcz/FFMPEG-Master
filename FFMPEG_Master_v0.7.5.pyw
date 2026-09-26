@@ -1472,12 +1472,40 @@ class App(ctk.CTk, TkinterDnD.DnDWrapper):
         self.btn_stop = ctk.CTkButton(self.bot_frame, text="STOP", height=50, width=120, fg_color="#a11a1a", font=("Arial", 15, "bold"), command=self.stop_process, state="disabled")
         self.btn_stop.pack(side="left", padx=10)
 
-        ctk.CTkLabel(self, text="DaTT.cz  © 2026", font=("Arial", 10), text_color="#3a3a3a").pack(side="bottom", pady=(0, 6))
+        ctk.CTkLabel(self, text="DaTT.cz  © 2026", font=("Arial", 10), text_color=("gray40", "gray60")).pack(side="bottom", pady=(0, 6))
 
         self.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.after(50, self._fit_window_to_content)
 
         if self.cfg.get("check_updates_on_startup", True):
             self.after(1500, lambda: threading.Thread(target=self._startup_update_check, daemon=True).start())
+
+    def _fit_window_to_content(self):
+        """Zajistí, aby se do okna vešlo všechno (log, oba průběhy, tlačítka SPUSTIT/STOP).
+
+        Potřebná výška se neodhaduje natvrdo - Tk ji po sestavení UI sám spočítá (winfo_reqheight),
+        takže sedí na každém systému bez ohledu na písma, DPI a měřítko. Okno se jen zvětší, nikdy
+        nezmenší (uživatel si ho mohl roztáhnout víc), a funguje to i pro starší uloženou velikost
+        v config.json, která byla menší. Stejná hodnota se nastaví jako minsize, takže okno nejde
+        zmenšit tak, aby se tlačítka ořízla."""
+        try:
+            self.update_idletasks()
+            # customtkinter násobí hodnoty v geometry()/minsize() měřítkem okna, winfo_* vrací
+            # skutečné pixely - proto převod zpět na "neškálované" jednotky.
+            scale = self._get_window_scaling() if hasattr(self, "_get_window_scaling") else 1.0
+            need_h = int(self.winfo_reqheight() / scale) + 10
+            screen_h = int(self.winfo_screenheight() / scale) - 80   # rezerva na panely / titulek
+            need_h = min(need_h, screen_h)
+            self.minsize(700, need_h)
+            cur_w = int(self.winfo_width() / scale)
+            cur_h = int(self.winfo_height() / scale)
+            if cur_h < need_h:
+                x, y = self.winfo_x(), self.winfo_y()
+                # Pokud by se zvětšené okno nevešlo dolů na obrazovku, posuň ho nahoru.
+                y_max = max(int(self.winfo_screenheight() / scale) - need_h - 60, 0)
+                self.geometry(f"{max(cur_w, 700)}x{need_h}+{x}+{min(y, y_max)}")
+        except Exception as e:
+            print(f"[FFMPEG Master] Přizpůsobení velikosti okna selhalo (nekritické): {e}", file=sys.stderr)
 
     # --- MENU ---
     def _build_menu(self):
