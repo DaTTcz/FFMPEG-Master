@@ -25,6 +25,9 @@ Desktopová aplikace pro Windows i Linux (Python + CustomTkinter) pro dávkovou 
 - Překódování do HEVC (`hevc_nvenc`, 10bit `p010le`), parametry CQ/preset/rozlišení podle configu, nebo plně vlastní FFmpeg parametry
 - Normalizace hlasitosti dvouprůchodovým `loudnorm` samostatně pro každou vybranou audio stopu (down-mix na stereo → přesné změření → normalizace), s fallbackem na 1-průchodový režim
 - **NFO generátor** s editovatelným titulem, rokem, žánrem (dropdown z configu) a plotem, volitelně vypnutelný pro konkrétní soubor
+- **Uložení/načtení fronty (`.ffm`)** — menu Fronta (Ctrl+S / Ctrl+O), přetažení `.ffm` do okna nebo `ffmpeg-master fronta.ffm`; ukládá vybrané stopy, NFO, ořez i střih, při načtení zdroje znovu ověří (velikost, délka, stopy)
+- **Ořez černých okrajů** — automatická detekce (cropdetect na 8 místech filmu, největší obdélník), náhled s vyznačeným ořezem a ruční doladění po stranách; při překódování filtr `crop`, při kopírování videa (H.264/HEVC) zápis do streamu bez překódování
+- **Střih (smart cut)** — okno pro jeden soubor s náhledem, krokováním po snímku/klíčovém snímku a značkami začátek/konec; úseky „ponechat“ nebo „vystřihnout“ (reklamy). Řez je přesný na snímek: mezi klíčovými snímky se video kopíruje beze ztráty, překódují se jen krátké okraje řezů (H.264, HEVC, MPEG-2), zvuk a titulky se kopírují. Výstup do originálního formátu, do fronty (i se spuštěním) nebo do `.ffm`; úseky jde upravit i u položky ve frontě (tlačítko „Střih…“)
 - Log průběhu (včetně hlášek o jednotlivých průchodech), progress bar na soubor i celkový, zvukové upozornění po dokončení
 
 ## Stažení hotové verze (doporučeno)
@@ -58,7 +61,7 @@ pip install -r requirements.txt
 ## Spuštění ze zdrojového kódu
 
 ```bash
-python FFMPEG_Master_v0.7.5.pyw
+python FFMPEG_Master_v0.8.0.pyw
 ```
 
 Při prvním spuštění se vedle scriptu (nebo vedle zabalené binárky/AppImage; u instalace z `.deb`/`.rpm` v `~/.config/ffmpeg-master/`, viz [BUILD.md](BUILD.md)) vytvoří `config.json` s výchozími hodnotami — uprav si ho přes menu **Nastavení** v aplikaci, nebo ručně (vzor v [config.example.json](config.example.json)).
