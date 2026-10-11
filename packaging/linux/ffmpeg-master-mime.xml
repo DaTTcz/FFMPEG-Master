@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/x-ffmpeg-master-queue">
+    <comment>FFMPEG Master queue</comment>
+    <comment xml:lang="cs">Fronta FFMPEG Master</comment>
+    <sub-class-of type="application/json"/>
+    <icon name="ffmpeg-master"/>
+    <glob pattern="*.ffm"/>
+  </mime-type>
+</mime-info>

@@ -33,6 +33,11 @@ contents:
     dst: /usr/share/icons/hicolor/256x256/apps/ffmpeg-master.png
     file_info:
       mode: 0644
+  # Typ souboru fronty .ffm (dvojklik ve správci souborů otevře frontu v appce)
+  - src: packaging/linux/ffmpeg-master-mime.xml
+    dst: /usr/share/mime/packages/ffmpeg-master.xml
+    file_info:
+      mode: 0644
 
 scripts:
   postinstall: packaging/linux/postinst.sh

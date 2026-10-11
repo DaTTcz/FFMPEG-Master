@@ -13,7 +13,7 @@
 
 # FFMPEG Master
 
-Desktopová aplikace pro Windows i Linux (Python + CustomTkinter) pro dávkovou konverzi videa přes **FFmpeg** — hromadné překódování do HEVC (NVENC na Windows, na Linuxu i software/VA-API kodeky), výběr audio/titulkových stop, normalizace hlasitosti (loudnorm, 2-průchodová analýza), generování NFO a přesun/přejmenování zpracovaných souborů.
+Desktopová aplikace pro Windows i Linux (Python + CustomTkinter) pro dávkovou konverzi videa přes **FFmpeg** — hromadné překódování do H.264, HEVC nebo AV1 (NVENC na Windows, na Linuxu i software/VA-API kodeky), výběr audio/titulkových stop, normalizace hlasitosti (loudnorm, 2-průchodová analýza), generování NFO a přesun/přejmenování zpracovaných souborů.
 
 ## Funkce
 
@@ -22,10 +22,10 @@ Desktopová aplikace pro Windows i Linux (Python + CustomTkinter) pro dávkovou 
 - **`config.json`** vedle programu — cesty k `ffmpeg`/`ffprobe`, výstupní/cílová složka, CQ/preset/rozlišení, audio bitrate, parametry `loudnorm`, generování NFO, chování se zdrojem zvlášť pro lokální a síťové disky (přesun/přejmenování/ponechat), motiv, uložená geometrie okna
 - **Menu lišta**: Nastavení (editace `config.json` z UI, včetně přepínače na vlastní FFmpeg příkaz) a O programu (verze, logo, kontakt, kontrola aktualizací)
 - **Kontrola aktualizací z GitHub Releases** — tichá kontrola při startu s nenápadným oznámením, manuální kontrola i stažení/instalace nové verze (Windows `.exe`, Linux AppImage, `.deb` i `.rpm`)
-- Překódování do HEVC (`hevc_nvenc`, 10bit `p010le`), parametry CQ/preset/rozlišení podle configu, nebo plně vlastní FFmpeg parametry
+- Překódování do **HEVC** (`hevc_nvenc`) nebo **AV1** (`av1_nvenc`, NVIDIA RTX 40xx a novější), obojí 10bit `p010le`, případně **H.264** (`h264_nvenc`, 8bit High@4.1 pro starší přehrávače a TV); zvuk **Opus** nebo **AAC** (u H.264 vždy AAC) — volba kodeku v Nastavení (každý kodek si pamatuje vlastní CQ/preset, tlačítko „Otestovat“ ověří, že ho grafika umí) i u jednotlivého souboru, parametry CQ/preset/rozlišení podle configu, nebo plně vlastní FFmpeg parametry
 - Normalizace hlasitosti dvouprůchodovým `loudnorm` samostatně pro každou vybranou audio stopu (down-mix na stereo → přesné změření → normalizace), s fallbackem na 1-průchodový režim
 - **NFO generátor** s editovatelným titulem, rokem, žánrem (dropdown z configu) a plotem, volitelně vypnutelný pro konkrétní soubor
-- **Uložení/načtení fronty (`.ffm`)** — menu Fronta (Ctrl+S / Ctrl+O), přetažení `.ffm` do okna nebo `ffmpeg-master fronta.ffm`; ukládá vybrané stopy, NFO, ořez i střih, při načtení zdroje znovu ověří (velikost, délka, stopy)
+- **Uložení/načtení fronty (`.ffm`)** — menu Fronta (Ctrl+S / Ctrl+O), dvojklik na `.ffm` ve správci souborů (Windows i Linux), přetažení `.ffm` do okna nebo `ffmpeg-master fronta.ffm`; ukládá vybrané stopy, NFO, ořez i střih, při načtení zdroje znovu ověří (velikost, délka, stopy)
 - **Ořez černých okrajů** — automatická detekce (cropdetect na 8 místech filmu, největší obdélník), náhled s vyznačeným ořezem a ruční doladění po stranách; při překódování filtr `crop`, při kopírování videa (H.264/HEVC) zápis do streamu bez překódování
 - **Střih (smart cut)** — okno pro jeden soubor s náhledem, krokováním po snímku/klíčovém snímku a značkami začátek/konec; úseky „ponechat“ nebo „vystřihnout“ (reklamy). Řez je přesný na snímek: mezi klíčovými snímky se video kopíruje beze ztráty, překódují se jen krátké okraje řezů (H.264, HEVC, MPEG-2), zvuk a titulky se kopírují. Výstup do originálního formátu, do fronty (i se spuštěním) nebo do `.ffm`; úseky jde upravit i u položky ve frontě (tlačítko „Střih…“)
 - Log průběhu (včetně hlášek o jednotlivých průchodech), progress bar na soubor i celkový, zvukové upozornění po dokončení
@@ -52,7 +52,7 @@ Pokud aplikace hlásí, že nejde analyzovat soubor, v logu je teď i konkrétn�
 - Windows nebo Linux
 - Nainstalovaný [FFmpeg](https://ffmpeg.org/) — na Windows `ffmpeg.exe`/`ffprobe.exe` (výchozí cesta `C:\FFMPEG\bin\...`, upravitelná v Nastavení), na Linuxu se očekává `ffmpeg`/`ffprobe` v `PATH`
 - Python 3.10+ s balíčky ze `requirements.txt` (`customtkinter`, `tkinterdnd2`, `pillow`) — na Linuxu navíc systémový Tk/Tcl (`sudo apt install python3-tk tk-dev` na Debianu/Ubuntu) — **jen pro spuštění ze zdrojového `.pyw`**, hotové binárky/balíčky výše si vše potřebné nesou samy
-- GPU s podporou NVENC (HEVC) pro hardwarové kódování — na Linuxu bez proprietárního NVIDIA driveru je potřeba v Nastavení přepnout na jiný kodek (`libx265`/`libx264`, nebo VA-API `hevc_vaapi`)
+- GPU s podporou NVENC pro hardwarové kódování (H.264/HEVC: GTX 10xx a novější, AV1: RTX 40xx a novější) — na Linuxu bez proprietárního NVIDIA driveru je potřeba v Nastavení přepnout na jiný kodek (`libx265`/`libx264`, nebo VA-API `hevc_vaapi`)
 
 ```bash
 pip install -r requirements.txt
@@ -61,7 +61,7 @@ pip install -r requirements.txt
 ## Spuštění ze zdrojového kódu
 
 ```bash
-python FFMPEG_Master_v0.8.0.pyw
+python FFMPEG_Master_v0.9.0.pyw
 ```
 
 Při prvním spuštění se vedle scriptu (nebo vedle zabalené binárky/AppImage; u instalace z `.deb`/`.rpm` v `~/.config/ffmpeg-master/`, viz [BUILD.md](BUILD.md)) vytvoří `config.json` s výchozími hodnotami — uprav si ho přes menu **Nastavení** v aplikaci, nebo ručně (vzor v [config.example.json](config.example.json)).
