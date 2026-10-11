@@ -8,3 +8,4 @@ Icon=ffmpeg-master
 Terminal=false
 Categories=AudioVideo;Video;
 MimeType=application/x-ffmpeg-master-queue;
+StartupWMClass=ffmpeg-master

@@ -25,7 +25,7 @@ import customtkinter as ctk
 from tkinter import messagebox, Listbox, filedialog, EXTENDED, SINGLE, Menu, Canvas, PhotoImage, StringVar
 from tkinterdnd2 import DND_FILES, TkinterDnD
 
-VERSION = "v0.9.0"
+VERSION = "v0.9.1"
 GITHUB_REPO = "DaTTcz/FFMPEG-Master"
 
 
@@ -245,6 +245,59 @@ def _register_linux_mime_type(data_home, remove=False):
         subprocess.run(["update-mime-database", mime_dir], capture_output=True, timeout=30)
 
 
+# Třída okna (WM_CLASS) na Linuxu - podle ní panel úloh spáruje okno s položkou v menu
+# (StartupWMClass= v .desktop) a ukáže u něj správnou ikonu.
+LINUX_WM_CLASS = "ffmpeg-master"
+LINUX_ICON_SIZE = 256
+
+
+def _linux_icon_needs_update(src_icon, icon_dest):
+    """Ikonu do menu je potřeba (znovu) vytvořit, pokud chybí, je starší než zdroj, nebo nemá
+    velikost 256 px (verze do 0.9.0 sem kopírovaly původní 1024px favicon.png)."""
+    if not os.path.exists(icon_dest):
+        return True
+    if os.path.getmtime(src_icon) > os.path.getmtime(icon_dest):
+        return True
+    try:
+        from PIL import Image
+        with Image.open(icon_dest) as im:
+            return im.size != (LINUX_ICON_SIZE, LINUX_ICON_SIZE)
+    except Exception:
+        return True
+
+
+def _write_linux_icon(src_icon, icon_dest):
+    """Uloží ikonu zmenšenou na 256x256 (do složky hicolor/256x256 patří opravdu 256 px).
+    Zapisuje přes dočasný soubor, ať launcher nikdy nenačte rozepsané PNG."""
+    tmp = icon_dest + ".tmp"
+    try:
+        from PIL import Image
+        with Image.open(src_icon) as im:
+            im = im.convert("RGBA")
+            if im.size != (LINUX_ICON_SIZE, LINUX_ICON_SIZE):
+                im = im.resize((LINUX_ICON_SIZE, LINUX_ICON_SIZE), Image.LANCZOS)
+            im.save(tmp, format="PNG", optimize=True)
+    except Exception:
+        # Bez PIL aspoň původní soubor (lepší než žádná ikona).
+        shutil.copyfile(src_icon, tmp)
+    os.replace(tmp, icon_dest)
+
+
+def _refresh_kde_menu_cache():
+    """KDE Plasma bere menu z vlastní cache (ksycoca). Bez jejího obnovení se nový/změněný záznam
+    objeví jen ve vyhledávání, ne v kategorii Multimédia. Spouští se na pozadí, start appky nečeká.
+    Na jiných prostředích nástroj není a nic se nestane."""
+    for tool in ("kbuildsycoca6", "kbuildsycoca5"):
+        exe = shutil.which(tool)
+        if exe:
+            try:
+                subprocess.Popen([exe], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 start_new_session=True)
+            except Exception:
+                pass
+            return
+
+
 def ensure_linux_desktop_entry():
     """Na Linuxu (jen ve zabalené binárce) zaregistruje aplikaci do standardní XDG nabídky/launcheru.
 
@@ -289,17 +342,17 @@ def ensure_linux_desktop_entry():
 
         icon_dest = os.path.join(icons_dir, "ffmpeg-master.png")
         src_icon = resource_path("favicon.png")
-        icon_value = "ffmpeg-master"
+        icon_value = src_icon
         if os.path.exists(src_icon):
             try:
-                if not os.path.exists(icon_dest) or os.path.getmtime(src_icon) > os.path.getmtime(icon_dest):
-                    shutil.copyfile(src_icon, icon_dest)
-            except Exception:
-                pass
-        else:
-            # Ikona se nikam nezkopírovala (nenašla se) - použij rovnou absolutní cestu k PNG vedle
-            # binárky/skriptu jako Icon=, ať launcher aspoň má šanci ji najít.
-            icon_value = src_icon
+                if _linux_icon_needs_update(src_icon, icon_dest):
+                    _write_linux_icon(src_icon, icon_dest)
+                if os.path.exists(icon_dest):
+                    icon_value = icon_dest
+            except Exception as e:
+                print(f"[FFMPEG Master] Uložení ikony do menu selhalo (nekritické): {e}", file=sys.stderr)
+        # Icon= je absolutní cesta, ne jméno "ffmpeg-master": KDE jinak ikonu hledá podle jména
+        # v aktivním tématu ikon a s některými tématy ukáže cizí ikonu (ověřeno na Kubuntu 26.04).
 
         desktop_path = os.path.join(apps_dir, "ffmpeg-master.desktop")
         if mode == "appimage":
@@ -320,6 +373,7 @@ def ensure_linux_desktop_entry():
             "Terminal=false\n"
             "Categories=AudioVideo;Video;\n"
             f"MimeType={QUEUE_MIME_TYPE};\n"
+            f"StartupWMClass={LINUX_WM_CLASS}\n"
         )
         needs_write = True
         if os.path.exists(desktop_path):
@@ -341,6 +395,7 @@ def ensure_linux_desktop_entry():
                 subprocess.run(["update-desktop-database", apps_dir], capture_output=True, timeout=5)
             except Exception:
                 pass
+            _refresh_kde_menu_cache()
         # Typ souboru .ffm -> dvojklik ve správci souborů otevře frontu v appce (.desktop má MimeType=).
         try:
             _register_linux_mime_type(data_home)
@@ -3821,7 +3876,8 @@ class _QueueItemFailed(Exception):
 
 class App(ctk.CTk, TkinterDnD.DnDWrapper):
     def __init__(self):
-        super().__init__()
+        # className = WM_CLASS okna na Linuxu (musí sedět se StartupWMClass v .desktop); na Windows nevadí.
+        super().__init__(className=LINUX_WM_CLASS)
         try:
             self.TkdndVersion = TkinterDnD._require(self)
             self.dnd_available = True

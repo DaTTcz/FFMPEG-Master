@@ -29,7 +29,9 @@ contents:
     dst: /usr/share/applications/ffmpeg-master.desktop
     file_info:
       mode: 0644
-  - src: favicon.png
+  # Ikona zmenšená na 256x256 (favicon.png má 1024 px a do složky 256x256 nepatří - KDE ji
+  # pak v menu zobrazí špatně).
+  - src: packaging/linux/ffmpeg-master.png
     dst: /usr/share/icons/hicolor/256x256/apps/ffmpeg-master.png
     file_info:
       mode: 0644
